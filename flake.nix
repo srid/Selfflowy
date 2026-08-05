@@ -38,7 +38,7 @@
       ];
     in
     {
-      devShells = forAllSystems ({ pkgs, ... }: {
+      devShells = forAllSystems ({ pkgs, system }: {
         default = pkgs.mkShell {
           packages = [
             pkgs.racket
@@ -46,6 +46,7 @@
             pkgs.watchexec
             pkgs.tzdata
             pkgs.npins
+            self.packages.${system}.acp-agent
           ];
           shellHook = ''
             export PLTUSERHOME="''${PLTUSERHOME:-$PWD/.plt-user}"
@@ -53,6 +54,10 @@
             if [ -d "${pkgs.tzdata}/share/zoneinfo" ]; then
               export TZDIR="${pkgs.tzdata}/share/zoneinfo"
             fi
+            # `serve` refuses to start without an ACP agent; hand it the
+            # bundled one so `just serve` works out of the box. Set the var
+            # yourself to point at a different agent.
+            export SELFFLOWY_ACP_AGENT="''${SELFFLOWY_ACP_AGENT:-${self.packages.${system}.acp-agent}/bin/claude-agent-acp}"
           '';
         };
       });
@@ -238,7 +243,11 @@
       apps = forAllSystems ({ pkgs, system }:
         let
           cli = "${self.packages.${system}.selfflowy}/bin/selfflowy";
+          # serve wants an ACP agent and will not start without one, so the app
+          # hands it the bundled adapter. Only serve: the bare CLI stays lean
+          # and never drags the node closure in. An exported var wins.
           serve = pkgs.writeShellScriptBin "selfflowy-serve" ''
+            export SELFFLOWY_ACP_AGENT="''${SELFFLOWY_ACP_AGENT:-${self.packages.${system}.acp-agent}/bin/claude-agent-acp}"
             exec ${cli} serve "$@"
           '';
           serveApp = {
