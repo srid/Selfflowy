@@ -247,6 +247,7 @@ Routes:
 |-------|------|
 | `GET /` | HTML page (Workflowy-style skin from `selfflowy/web/render.rkt`) |
 | `GET /today` | the first node titled with today's ISO date (the Daily day node), zoomed; terse empty state when there is none yet |
+| `GET /events` | `text/event-stream`, never ends. `event: outline` with the store revision as its data whenever a watched file reloaded, plus one at local midnight; `:hb` comment every 15s so proxies leave it alone |
 | `GET /api/tree` | byte-identical to `selfflowy tree` |
 | `GET /api/agenda` | byte-identical to `selfflowy agenda --json` |
 | `GET /static/*` | files under `selfflowy/web/static/` |
@@ -258,10 +259,14 @@ links people wrote by hand still resolve.
 
 Paths that climb out of `static/` are 404, not files.
 
-**Edits are picked up on the next request.** The server keeps a snapshot of
-the outlines (roots plus every `@include` fragment) and reloads it when a
-watched file's mtime or size changes; a reload runs in a fresh namespace, so
-the module registry cannot serve you yesterday's file.
+**Edits are pushed, and picked up on the next request either way.** The server
+keeps a snapshot of the outlines (roots plus every `@include` fragment) and
+reloads it when a watched file's mtime or size changes; a reload runs in a
+fresh namespace, so the module registry cannot serve you yesterday's file. A
+watcher holds a `filesystem-change-evt` on each watched file's *directory*
+(saves are atomic renames, which fire there), debounces the flurry, and pushes
+an `outline` event on `/events` when the store actually reloaded. Open pages
+re-fetch themselves and swap the pane and the error banner — no refresh.
 
 A file is broken for a moment during every edit, so the two surfaces differ:
 
@@ -272,9 +277,9 @@ A file is broken for a moment during every edit, so the two surfaces differ:
   `file:line:col`, in a banner at the top of the page. With no last-good
   snapshot (the first load failed) it answers `500` with the same banner.
 
-There is **no live push yet**: the page ships the htmx SSE extension but the
-server opens no event stream, so a reload is still a reload. That is the next
-thing to land here.
+A broken file pushes an event too — the banner appearing IS the news — so the
+revision moves on a failed reload as well as a good one. It is a counter, not
+a version: compare it, do not parse it.
 
 Exit codes: 0 on clean shutdown, 1 on bad flags or a port it cannot bind,
 3 when an outline path does not exist.
