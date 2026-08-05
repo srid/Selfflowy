@@ -37,6 +37,15 @@ Selfflowy roadmap #project
       : (Grid view later retired with the html command; query/move/ics live.)
   0.2b.2 cross-file mirrors
     : Link anchors across outline files (not yet).
+  glob includes
+    : `@include Daily/*.rkt` -- one line instead of a line per month.
+    : The sugar has to answer: match order (lexicographic; date-named
+    : fragments sort right), zero matches (empty or error?), and flat
+    : splice vs structure (Daily.rkt's year > month nesting comes from
+    : the index file's own nodes; a flat glob erases it). Mechanically
+    : easy: the reader expands the glob at read time, the module graph
+    : stays static per load, the watcher already re-reads the include
+    : set.
   typed edges
     : The graph beyond containment (the Tend thesis). Tree stays the
     : spanning structure -- every node has one defining site; any other
