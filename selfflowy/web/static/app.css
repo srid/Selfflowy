@@ -611,6 +611,12 @@ body.sf-body:has(.sf-chat.is-open) .sf-main {
   color: var(--dim);
 }
 
+/* the model, when the agent named one. Empty means unknown, and unknown says
+   nothing at all — separator included. */
+.sf-chat-model { opacity: 0.8; }
+
+.sf-chat-model:not(:empty)::before { content: " · "; }
+
 .sf-chat-actions { display: flex; align-items: center; gap: 0.375rem; }
 
 .sf-chat-btn, .sf-chat-send, .sf-chat-stop {

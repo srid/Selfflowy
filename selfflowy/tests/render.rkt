@@ -435,12 +435,13 @@
     (hash 'type "turn" 'text text 'agent agent 'tools tools
           'status status 'stopReason stop 'error err))
 
-  (define (panel transcript)
+  (define (panel transcript #:model [model #f])
     (xstr (render-chat-panel transcript
                              #:send-href "/chat"
                              #:new-href "/chat/new"
                              #:cancel-href "/chat/cancel"
-                             #:event "chat")))
+                             #:event "chat"
+                             #:model model)))
 
   (test-case "an empty panel is a form, a sink and the routes it was told"
     (define s (panel '()))
@@ -511,6 +512,19 @@
     (check-false (regexp-match? #rx"<b[ >]" s) s)
     (check-true (string-contains? s "data-tool-id=\"c&lt;1\"") s)
     (check-true (string-contains? s "✗") s))
+
+  ;; The model is the agent's word, replayed. Unknown is not "unknown": the
+  ;; span is there for a `model` frame to fill, and empty until one lands.
+  (test-case "the header names the model when there is one, and omits it when not"
+    (define named (panel '() #:model "fake-model-1"))
+    (check-true (string-contains? named "agent · claude code") named)
+    (check-true (string-contains? named
+                                  "<span class=\"sf-chat-model\" id=\"sf-chat-model\">fake-model-1</span>")
+                named)
+    (define bare (panel '()))
+    (check-true (string-contains? bare "id=\"sf-chat-model\"") bare)
+    (check-false (string-contains? bare "fake-model") bare)
+    (check-false (string-contains? bare "unknown") bare))
 
   (test-case "the chat script stays tiny, framework-free and connection-free"
     (define js (file->string (build-path (web-static-dir) "chat.js")))

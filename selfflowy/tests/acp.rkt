@@ -186,19 +186,22 @@
        (agent-prompt! ag "hello there")
        (define fs (frames-through frames "done"))
        (check-equal? (map car fs) (make-list (length fs) "chat"))
+       ;; the `model` frame is the session announcing itself: the subprocess
+       ;; is spawned by this first prompt, so it lands inside this first turn
        (check-equal? (frame-types fs)
-                     '("user" "chunk" "chunk" "tool" "tool" "done"))
+                     '("user" "model" "chunk" "chunk" "tool" "tool" "done"))
        (define js (map cdr fs))
        (check-equal? (hash-ref (list-ref js 0) 'text) "hello there")
-       (check-equal? (hash-ref (list-ref js 1) 'text) "hello ")
-       (check-equal? (hash-ref (list-ref js 2) 'text) "world")
+       (check-equal? (hash-ref (list-ref js 1) 'name) "fake-model-1")
+       (check-equal? (hash-ref (list-ref js 2) 'text) "hello ")
+       (check-equal? (hash-ref (list-ref js 3) 'text) "world")
        ;; one line, two frames: the same id, the status moving
-       (check-equal? (hash-ref (list-ref js 3) 'id) "call-1")
-       (check-equal? (hash-ref (list-ref js 3) 'title) "read Tasks.rkt")
-       (check-equal? (hash-ref (list-ref js 3) 'status) "pending")
        (check-equal? (hash-ref (list-ref js 4) 'id) "call-1")
-       (check-equal? (hash-ref (list-ref js 4) 'status) "completed")
-       (check-equal? (hash-ref (list-ref js 5) 'stopReason) "end_turn")
+       (check-equal? (hash-ref (list-ref js 4) 'title) "read Tasks.rkt")
+       (check-equal? (hash-ref (list-ref js 4) 'status) "pending")
+       (check-equal? (hash-ref (list-ref js 5) 'id) "call-1")
+       (check-equal? (hash-ref (list-ref js 5) 'status) "completed")
+       (check-equal? (hash-ref (list-ref js 6) 'stopReason) "end_turn")
        ;; and the transcript is that turn, accumulated
        (check-true (wait-idle ag))
        (define t (agent-transcript ag))
@@ -222,8 +225,38 @@
        (agent-prompt! ag "read a file PERMISSION please")
        (define fs (frames-through frames "done"))
        (check-equal? (frame-types fs)
-                     '("user" "chunk" "chunk" "tool" "tool" "done"))
+                     '("user" "model" "chunk" "chunk" "tool" "tool" "done"))
        (check-equal? (hash-ref (cdr (last fs)) 'stopReason) "end_turn"))))
+
+  ;; ---- which model ---------------------------------------------------------
+  ;;
+  ;; The agent's word, never the bridge's guess: a session config option, in
+  ;; the session/new result and again in a config_option_update. Both paths.
+
+  (test-case "the model arrives with the session, sticks, and follows a switch"
+    (with-agent
+     (λ (ag frames _log)
+       ;; nothing has been asked yet, so nothing is known
+       (check-false (agent-model ag))
+       (agent-prompt! ag "hello there")
+       (define fs (frames-through frames "done"))
+       (check-equal? (frame-types fs)
+                     '("user" "model" "chunk" "chunk" "tool" "tool" "done"))
+       (check-equal? (hash-ref (cdr (list-ref fs 1)) 'name) "fake-model-1")
+       (check-true (wait-idle ag))
+       (check-equal? (agent-model ag) "fake-model-1")
+       ;; a session that changes model mid-turn says so, in place
+       (agent-prompt! ag "MODEL switch please")
+       (define fs2 (frames-through frames "done"))
+       (check-equal? (frame-types fs2)
+                     '("user" "chunk" "model" "chunk" "tool" "tool" "done"))
+       (check-equal? (hash-ref (cdr (list-ref fs2 2)) 'name) "fake-model-2")
+       (check-true (wait-idle ag))
+       (check-equal? (agent-model ag) "fake-model-2")
+       ;; and a third turn on the same model is silent about it
+       (agent-prompt! ag "still there")
+       (check-equal? (frame-types (frames-through frames "done"))
+                     '("user" "chunk" "chunk" "tool" "tool" "done")))))
 
   ;; ---- one turn at a time --------------------------------------------------
 
@@ -233,6 +266,7 @@
        (agent-prompt! ag "SLOW down")
        ;; wait for the turn to be really under way, not just accepted
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "user")
+       (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "model")
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "chunk")
        (define e
          (with-handlers ([exn:fail:op? values])
@@ -273,6 +307,7 @@
      (λ (ag frames _log)
        (agent-prompt! ag "SLOW down")
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "user")
+       (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "model")
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "chunk")
        (agent-cancel! ag)
        (define done (cdr (next-frame frames)))
@@ -288,13 +323,14 @@
      (λ (ag frames _log)
        (agent-prompt! ag "CRASH now")
        (define fs (frames-through frames "error"))
-       (check-equal? (frame-types fs) '("user" "chunk" "error"))
+       (check-equal? (frame-types fs) '("user" "model" "chunk" "error"))
        (check-true (string-contains? (hash-ref (cdr (last fs)) 'message) "exited")
                    (format "~a" (cdr (last fs))))
        (check-true (wait-idle ag))
        ;; no respawn loop: nothing started a process nobody asked for
        (check-equal? (length (agent-transcript ag)) 2)
-       ;; the next prompt gets a fresh agent, and a fresh session with it
+       ;; the next prompt gets a fresh agent, and a fresh session with it —
+       ;; running the same model, so nothing is said about it a second time
        (agent-prompt! ag "are you back")
        (check-equal? (frame-types (frames-through frames "done"))
                      '("user" "chunk" "chunk" "tool" "tool" "done"))
@@ -317,7 +353,7 @@
      (λ (ag frames log)
        (agent-prompt! ag "hello there")
        (check-equal? (frame-types (frames-through frames "done"))
-                     '("user" "chunk" "chunk" "tool" "tool" "done"))
+                     '("user" "model" "chunk" "chunk" "tool" "tool" "done"))
        (check-true (wait-idle ag))
        (define noise
          (let loop ([n 0])
@@ -393,7 +429,7 @@
        (check-equal? body "" body)
        (define fs (events-through in "done"))
        (check-equal? (for/list ([f (in-list fs)]) (hash-ref f 'type))
-                     '("user" "chunk" "chunk" "tool" "tool" "done"))
+                     '("user" "model" "chunk" "chunk" "tool" "tool" "done"))
        (check-equal? (hash-ref (car fs) 'text) "hello there")
        (define done (last fs))
        (check-equal? (hash-ref done 'stopReason) "end_turn")
@@ -423,7 +459,7 @@
        ;; talking, which is the state this 409 is about.
        (check-equal? (for/list ([f (in-list (events-through in "chunk"))])
                        (hash-ref f 'type))
-                     '("user" "chunk"))
+                     '("user" "model" "chunk"))
        (define-values (busy body) (POST port "/chat" '((text . "and another"))))
        (check-equal? busy 409 body)
        (check-true (string-contains? body "busy") body)
@@ -467,7 +503,10 @@
        ;; the agent's finished text is Markdown; the tool line is one line
        (check-true (string-contains? body "<p>hello world</p>") body)
        (check-true (string-contains? body "data-tool-id=\"call-1\"") body)
-       (check-true (string-contains? body "data-status=\"completed\"") body))))
+       (check-true (string-contains? body "data-status=\"completed\"") body)
+       ;; the header is replayed too: the model frame was ephemeral, the model
+       ;; the bridge learned from it is not
+       (check-true (string-contains? body "id=\"sf-chat-model\">fake-model-1<") body))))
 
   (test-case "the page carries the panel, its script, and ONE sse connection"
     (with-server

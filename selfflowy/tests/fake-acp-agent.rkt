@@ -14,6 +14,7 @@
 ;;   CRASH        exit 1 mid-turn, after the first chunk
 ;;   SLOW         dawdle between chunks, long enough to cancel
 ;;   PERMISSION   ask session/request_permission and wait for the answer
+;;   MODEL        switch models mid-turn (a config_option_update)
 ;;
 ;; Every turn also writes one line to stderr: the bridge drains that pipe into
 ;; the server's log, and a bridge that did not would eventually block here.
@@ -59,6 +60,21 @@
 ;; Set by a session/cancel notification, cleared when a prompt is accepted —
 ;; both in the reading loop, so the two stay in the order they arrived.
 (define cancelled? (box #f))
+
+;; Which model this session is running. Reported the way a Claude Code adapter
+;; reports it: a session CONFIG OPTION, in the session/new result and again in
+;; a config_option_update when it moves.
+(define model (box "fake-model-1"))
+
+(define (config-options)
+  (list (hash 'id "model"
+              'name "Model"
+              'description "AI model to use"
+              'category "model"
+              'type "select"
+              'currentValue (unbox model)
+              'options (list (hash 'value "fake-model-1" 'name "fake-model-1")
+                             (hash 'value "fake-model-2" 'name "fake-model-2")))))
 
 ;; The permission answer the turn is waiting for, posted by the main loop.
 (define permission-ch (make-channel))
@@ -111,6 +127,10 @@
   (when (string-contains? text "CRASH")
     (flush-output (current-output-port))
     (exit 1))
+  (when (string-contains? text "MODEL")
+    (set-box! model "fake-model-2")
+    (update! (hash 'sessionUpdate "config_option_update"
+                   'configOptions (config-options))))
   (when (string-contains? text "PERMISSION")
     (define answer (ask-permission!))
     (unless answer
@@ -157,7 +177,7 @@
                         'agentCapabilities (hash 'loadSession #f)
                         'agentInfo (hash 'name "fake-acp-agent" 'version "1")))]
     [(equal? method "session/new")
-     (respond! id (hash 'sessionId session-id))]
+     (respond! id (hash 'sessionId session-id 'configOptions (config-options)))]
     [(equal? method "session/set_mode")
      (respond! id (hash))]
     [(equal? method "session/cancel") (set-box! cancelled? #t)]

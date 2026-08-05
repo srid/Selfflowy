@@ -272,7 +272,16 @@ frames ride `/events` under the `chat` event name, one JSON object per event:
 `{"type":"tool","id","title","status"}` (the same `id` twice means the same
 line, updated), `{"type":"done","stopReason","html"}` (`html` is the turn's
 agent text rendered as Markdown), `{"type":"error","message"}`,
-`{"type":"reset"}`. New keys may appear; existing ones keep their meaning.
+`{"type":"reset"}`, `{"type":"model","name"}`. New keys may appear; existing
+ones keep their meaning.
+
+The `model` frame is which model the session is running, and it is the agent's
+word for it — the adapter reports the model as a session **config option**
+(`configOptions`, the entry with id `model`), once in the `session/new` result
+and again in a `config_option_update` whenever it changes under a live session.
+The bridge reads it from both, remembers it, and pushes a frame only when the
+name actually moved. An agent that never says leaves the header alone; nothing
+is inferred from a command line or a version.
 
 A turn is accepted (and its `user` frame pushed) before the subprocess exists,
 so a cancel can arrive during the handshake. It is remembered and sent as soon
@@ -305,8 +314,9 @@ The chat panel (a `>_ agent` button, bottom right; open state remembered in
 `localStorage`) is server-rendered from the bridge's transcript on every page
 load — frames are ephemeral, so a reload or a second tab replays instead of
 missing the conversation — and kept live by `static/chat.js` off the page's one
-SSE connection. Agent text is Markdown at render time, same as titles and
-notes; what you typed and a tool's title never are.
+SSE connection. Its header names the model when the agent has reported one.
+Agent text is Markdown at render time, same as titles and notes; what you typed
+and a tool's title never are.
 
 **Edits are pushed, and picked up on the next request either way.** The server
 keeps a snapshot of the outlines (roots plus every `@include` fragment) and

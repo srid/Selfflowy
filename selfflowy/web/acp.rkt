@@ -62,6 +62,7 @@
           [agent-reset! (-> acp-agent? void?)]
           [agent-stop! (-> acp-agent? void?)]
           [agent-busy? (-> acp-agent? boolean?)]
+          [agent-model (-> acp-agent? (or/c string? #f))]
           [agent-transcript (-> acp-agent? (listof hash?))]))
 
 ;; The SSE event name chat frames ride under. One owner: the page that
@@ -127,7 +128,7 @@
 (struct acp-agent (command cwd broadcast log-port cust
                    sema boot-sema out-sema
                    [sp #:mutable] [stdin #:mutable] [stdout #:mutable]
-                   [session #:mutable]
+                   [session #:mutable] [model #:mutable]
                    [next-id #:mutable] [pending #:mutable]
                    [busy? #:mutable] [live-turn #:mutable]
                    [cancel-pending? #:mutable]
@@ -158,7 +159,7 @@
              (make-custodian)
              (make-semaphore 1) (make-semaphore 1) (make-semaphore 1)
              #f #f #f
-             #f
+             #f #f
              0 (hash)
              #f #f
              #f
@@ -207,6 +208,10 @@
 ;;                                            plain text the chunks built
 ;;   {"type":"error","message"}               the turn ended badly
 ;;   {"type":"reset"}                         new chat: panels clear
+;;   {"type":"model","name"}                  which model the session runs,
+;;                                            the moment the agent says so —
+;;                                            with the session, and again if
+;;                                            it changes under one
 
 (define (broadcast! ag js)
   (with-handlers ([exn:fail? (λ (e) (log-line ag (format "broadcast failed: ~a" (exn-message e))))])
@@ -243,6 +248,51 @@
 
 (define (agent-busy? ag)
   (with-state ag (λ () (and (acp-agent-busy? ag) #t))))
+
+;; ---- which model ------------------------------------------------------------
+;;
+;; The agent reports its model as one of the session's CONFIG OPTIONS: the
+;; entry with id "model" carries the live model in `currentValue`, and the
+;; picker it came from in `options`. It arrives twice over — in the session/new
+;; result, and again in a `config_option_update` whenever anything in that set
+;; moves — so one reader serves both, and nothing here ever guesses a name.
+
+(define model-config-id "model")
+
+(define (agent-model ag)
+  (with-state ag (λ () (acp-agent-model ag))))
+
+;; The picker's own label ("Fable", "Opus") is what the agent calls the model,
+;; and it is what a header wants; the raw id is the fallback for a session
+;; running something the picker no longer offers.
+(define (config-options-model opts)
+  (and (list? opts)
+       (for/or ([o (in-list opts)]
+                #:when (hash? o))
+         (and (equal? (hash-ref o 'id #f) model-config-id)
+              (let ([current (string-or-false (hash-ref o 'currentValue #f))])
+                (and current
+                     (or (option-name (hash-ref o 'options '()) current)
+                         current)))))))
+
+(define (option-name options value)
+  (and (list? options)
+       (for/or ([o (in-list options)]
+                #:when (hash? o))
+         (and (equal? (hash-ref o 'value #f) value)
+              (string-or-false (hash-ref o 'name #f))))))
+
+;; Learned, never configured. The frame goes out only when the name actually
+;; moved: a session that reports the same model on every reset would otherwise
+;; tell every panel the same thing over and over.
+(define (learn-model! ag opts)
+  (define name (config-options-model opts))
+  (when name
+    (with-state ag
+      (λ ()
+        (unless (equal? name (acp-agent-model ag))
+          (set-acp-agent-model! ag name)
+          (broadcast! ag (hash 'type "model" 'name name)))))))
 
 ;; ---- the wire --------------------------------------------------------------
 
@@ -417,6 +467,9 @@
                    (hash-ref u 'toolCallId #f)
                    (string-or-false (hash-ref u 'title #f))
                    (string-or-false (hash-ref u 'status #f)))]
+    ;; the whole config set, resent: only the model is read out of it
+    [(equal? kind "config_option_update")
+     (learn-model! ag (hash-ref u 'configOptions '()))]
     [(member kind ignored-update-kinds) (void)]
     [else (log-kind-once! ag (format "session/update ~a" kind))]))
 
@@ -544,6 +597,8 @@
   (define sid (hash-ref r 'sessionId #f))
   (unless (string? sid) (user-fail "session/new returned no sessionId"))
   (with-state ag (λ () (set-acp-agent-session! ag sid)))
+  ;; the session says what it runs; a bridge that asked would be guessing
+  (learn-model! ag (hash-ref r 'configOptions '()))
   (with-handlers ([exn:fail?
                    (λ (e)
                      (log-line ag (format "set_mode ~a refused: ~a" bypass-mode (exn-message e)))

@@ -9,7 +9,7 @@
 // chunks accumulated.
 (function(){
   var KEY='selfflowy.chat';
-  var panel,dock,body,form,input,sink,turn,agentEl;
+  var panel,dock,body,form,input,sink,turn,agentEl,modelEl;
 
   // ---- open / closed (same shape as collapse.js: a class, remembered) ----
   //
@@ -108,6 +108,11 @@
       endTurn();
       body.textContent='';
     }
+    // the header's one live bit: which model, learned with the session and
+    // again if it changes under one. The page renders whatever was known then.
+    else if(f.type==='model'){
+      if(modelEl)modelEl.textContent=typeof f.name==='string'?f.name:'';
+    }
   }
 
   function endTurn(){turn=null;agentEl=null;setBusy(false)}
@@ -143,6 +148,7 @@
     form=document.getElementById('sf-chat-form');
     input=form.querySelector('.sf-chat-input');
     sink=document.getElementById('sf-chat-sink');
+    modelEl=document.getElementById('sf-chat-model');
     var open='0';
     try{open=localStorage.getItem(KEY)||'0'}catch(e){}
     setOpen(open==='1');

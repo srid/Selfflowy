@@ -77,10 +77,11 @@
                  #:toggle-base (or/c string? #f))
                 list?)]
           [render-chat-panel
-           (-> (listof hash?)
-               #:send-href string? #:new-href string? #:cancel-href string?
-               #:event string?
-               list?)]
+           (->* ((listof hash?)
+                 #:send-href string? #:new-href string? #:cancel-href string?
+                 #:event string?)
+                (#:model (or/c string? #f))
+                list?)]
           [render-empty-pane (-> string? #:home-href string? list?)]
           [render-error-banner (->* (string?) (#:where (or/c string? #f)) list?)]
           [page->html-string (-> any/c string?)]
@@ -591,7 +592,8 @@
                            #:send-href send-href
                            #:new-href new-href
                            #:cancel-href cancel-href
-                           #:event event)
+                           #:event event
+                           #:model [model #f])
   ;; A turn was still running when this page was rendered: the panel comes up
   ;; in that state (input disabled, stop showing) rather than idle.
   (define busy?
@@ -602,7 +604,12 @@
                 ">_ agent")
         (aside ((class ,(classes "sf-chat" (and busy? "is-busy"))) (id "sf-chat"))
                (div ((class "sf-chat-head"))
-                    (span ((class "sf-chat-title")) "agent · claude code")
+                    ;; Which model, when the bridge has heard one — never a
+                    ;; placeholder. Its own span, and the separator is the
+                    ;; span's (app.css), so a `model` frame sets one string.
+                    (span ((class "sf-chat-title")) "agent · claude code"
+                          (span ((class "sf-chat-model") (id "sf-chat-model"))
+                                ,(or model "")))
                     (div ((class "sf-chat-actions"))
                          (button ((type "button") (class "sf-chat-btn")
                                   (data-post ,new-href) (title "new chat"))
