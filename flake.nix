@@ -141,18 +141,21 @@
               ''
                 entry="${mods}/@agentclientprotocol/claude-agent-acp/dist/index.js"
                 test -f "$entry"
-              '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                 claude="${mods}/@anthropic-ai/claude-agent-sdk-${nodeArch}/claude"
                 test -x "$claude"
+              '' + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
                 patchelf --set-interpreter \
                   "$(cat "${pkgs.stdenv.cc}/nix-support/dynamic-linker")" "$claude"
               '' + ''
-                # Node is pinned; the agent never resolves one off PATH. The
-                # env is what nixpkgs' claude-code sets: no self-update (this
-                # closure is immutable), and the ripgrep bundled inside the bun
-                # archive is unpatchable, so hand it the one from the store.
+                # Node is pinned and so is the CLI the SDK drives (the adapter
+                # reads CLAUDE_CODE_EXECUTABLE before it goes looking); nothing
+                # here resolves off PATH. The rest of the env is what nixpkgs'
+                # claude-code sets: no self-update (this closure is immutable),
+                # and the ripgrep buried in the bun archive cannot be patched,
+                # so hand it the one from the store.
                 makeWrapper ${pkgs.nodejs}/bin/node "$out/bin/claude-agent-acp" \
                   --add-flags "$entry" \
+                  --set-default CLAUDE_CODE_EXECUTABLE "$claude" \
                   --set DISABLE_AUTOUPDATER 1 \
                   --set DISABLE_INSTALLATION_CHECKS 1 \
                   --set USE_BUILTIN_RIPGREP 0 \
