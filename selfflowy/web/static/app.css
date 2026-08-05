@@ -728,7 +728,60 @@ body.sf-body:has(.sf-chat.is-open) .sf-main {
   padding: 0.625rem 0.75rem;
   border-top: 1px solid var(--line);
   background: color-mix(in srgb, var(--panel) 85%, var(--paper));
+  /* the input row is what the command popover hangs off */
+  position: relative;
 }
+
+/* ---- the slash-command popover ---------------------------------------- */
+
+/* Opens upward, over the conversation: the input row is the last line of the
+   panel, and a menu below it would be off the screen. Its own surface, one
+   step up from the row it belongs to. */
+.sf-chat-pop {
+  position: absolute;
+  left: 0.75rem;
+  right: 0.75rem;
+  bottom: 100%;
+  z-index: 1;
+  max-height: 14rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel);
+  box-shadow: 0 -4px 12px color-mix(in srgb, var(--ink) 12%, transparent);
+}
+
+.sf-chat-pop[hidden] { display: none; }
+
+.sf-chat-cmd {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  cursor: pointer;
+}
+
+.sf-chat-cmd-name {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--green);
+}
+
+/* one line per command: the description is context, not the thing being read */
+.sf-chat-cmd-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.75rem;
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* the keyboard's highlight and the mouse's are the same mark */
+.sf-chat-cmd.is-picked, .sf-chat-cmd:hover { background: var(--pill-bg); }
 
 .sf-chat-input {
   flex: 1 1 auto;

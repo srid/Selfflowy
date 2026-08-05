@@ -272,8 +272,9 @@ frames ride `/events` under the `chat` event name, one JSON object per event:
 `{"type":"tool","id","title","status"}` (the same `id` twice means the same
 line, updated), `{"type":"done","stopReason","html"}` (`html` is the turn's
 agent text rendered as Markdown), `{"type":"error","message"}`,
-`{"type":"reset"}`, `{"type":"model","name"}`. New keys may appear; existing
-ones keep their meaning.
+`{"type":"reset"}`, `{"type":"model","name"}`,
+`{"type":"commands","commands":[{"name","description"}]}`. New keys may appear;
+existing ones keep their meaning.
 
 The `model` frame is which model the session is running, and it is the agent's
 word for it — the adapter reports the model as a session **config option**
@@ -282,6 +283,15 @@ and again in a `config_option_update` whenever it changes under a live session.
 The bridge reads it from both, remembers it, and pushes a frame only when the
 name actually moved. An agent that never says leaves the header alone; nothing
 is inferred from a command line or a version.
+
+The `commands` frame is the agent's slash commands — the adapter pushes the
+whole list as an `available_commands_update` (`availableCommands`, each entry
+`{name, description, input}`) just after `session/new`, and again whenever the
+set moves under a live session. The bridge keeps the names and descriptions,
+drops `input` (an argument hint the panel does not draw), and pushes a frame
+only when the list actually changed. A command is INVOKED as ordinary prompt
+text — `/name arguments` in a `POST /chat` — so nothing else on the wire knows
+about them.
 
 A turn is accepted (and its `user` frame pushed) before the subprocess exists,
 so a cancel can arrive during the handshake. It is remembered and sent as soon
@@ -317,6 +327,12 @@ missing the conversation — and kept live by `static/chat.js` off the page's on
 SSE connection. Its header names the model when the agent has reported one.
 Agent text is Markdown at render time, same as titles and notes; what you typed
 and a tool's title never are.
+
+Typing `/` in the panel's input opens a completion popover over the agent's
+slash commands (replayed onto the panel as `data-commands`, kept live by the
+`commands` frame): ↑/↓ move, Enter or Tab accept the highlighted one into the
+input, Esc closes, and Enter with nothing open sends the message as always.
+Accepting only writes `/name ` — sending is what invokes it.
 
 **Edits are pushed, and picked up on the next request either way.** The server
 keeps a snapshot of the outlines (roots plus every `@include` fragment) and

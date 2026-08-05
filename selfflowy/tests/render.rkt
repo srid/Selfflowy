@@ -435,13 +435,28 @@
     (hash 'type "turn" 'text text 'agent agent 'tools tools
           'status status 'stopReason stop 'error err))
 
-  (define (panel transcript #:model [model #f])
+  (define (panel transcript #:model [model #f] #:commands [commands '()])
     (xstr (render-chat-panel transcript
                              #:send-href "/chat"
                              #:new-href "/chat/new"
                              #:cancel-href "/chat/cancel"
                              #:event "chat"
-                             #:model model)))
+                             #:model model
+                             #:commands commands)))
+
+  ;; The commands ride in an attribute as JSON, which means two escapings meet
+  ;; there. Reading it back the way a browser does is the only assertion that
+  ;; says the round trip works.
+  (define (unescape s)
+    (for/fold ([s s]) ([pair (in-list '(("&quot;" "\"") ("&lt;" "<") ("&gt;" ">")
+                                        ;; last: an escaped ampersand is what
+                                        ;; the others are made of
+                                        ("&amp;" "&")))])
+      (string-replace s (car pair) (cadr pair))))
+
+  (define (panel-commands s)
+    (define m (regexp-match #rx"data-commands=\"([^\"]*)\"" s))
+    (and m (string->jsexpr (unescape (cadr m)))))
 
   (test-case "an empty panel is a form, a sink and the routes it was told"
     (define s (panel '()))
@@ -525,6 +540,24 @@
     (check-true (string-contains? bare "id=\"sf-chat-model\"") bare)
     (check-false (string-contains? bare "fake-model") bare)
     (check-false (string-contains? bare "unknown") bare))
+
+  ;; The agent's slash commands, replayed so a reloaded page completes before
+  ;; the agent says anything. An empty list is an empty list, not a missing
+  ;; attribute: chat.js parses one thing.
+  (test-case "the panel carries the commands the agent offers, JSON in an attribute"
+    (define offered (list (hash 'name "fake-init" 'description "start something")
+                          (hash 'name "quote\"me" 'description "<b>not html</b>")))
+    (define s (panel '() #:commands offered))
+    ;; read back the way a browser reads it: unescape the attribute, parse the
+    ;; JSON (which is read-json's hasheq, not the hash that went in)
+    (check-equal? (panel-commands s)
+                  (list (hasheq 'name "fake-init" 'description "start something")
+                        (hasheq 'name "quote\"me" 'description "<b>not html</b>")))
+    ;; the attribute is escaped, so nothing in it can end the tag
+    (check-false (string-contains? s "<b>not html</b>") s)
+    (define bare (panel '()))
+    (check-equal? (panel-commands bare) '())
+    (check-true (string-contains? bare "data-commands=\"[]\"") bare))
 
   (test-case "the chat script stays tiny, framework-free and connection-free"
     (define js (file->string (build-path (web-static-dir) "chat.js")))

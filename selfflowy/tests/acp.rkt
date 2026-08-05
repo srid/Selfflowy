@@ -64,6 +64,13 @@
 (define (frame-types fs)
   (for/list ([f (in-list fs)]) (hash-ref (cdr f) 'type #f)))
 
+;; A command list as pairs, and its key count beside it. A frame's hashes come
+;; back from read-json and the bridge's are its own, so the comparison is over
+;; content — and the count is how "and nothing else" is said.
+(define (command-pairs cs)
+  (for/list ([c (in-list cs)])
+    (list (hash-ref c 'name #f) (hash-ref c 'description #f) (hash-count c))))
+
 (define (wait-idle ag [seconds 30])
   (define deadline (+ (current-inexact-milliseconds) (* 1000.0 seconds)))
   (let loop ()
@@ -186,22 +193,23 @@
        (agent-prompt! ag "hello there")
        (define fs (frames-through frames "done"))
        (check-equal? (map car fs) (make-list (length fs) "chat"))
-       ;; the `model` frame is the session announcing itself: the subprocess
-       ;; is spawned by this first prompt, so it lands inside this first turn
+       ;; the `model` and `commands` frames are the session announcing itself:
+       ;; the subprocess is spawned by this first prompt, so they land inside
+       ;; this first turn
        (check-equal? (frame-types fs)
-                     '("user" "model" "chunk" "chunk" "tool" "tool" "done"))
+                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
        (define js (map cdr fs))
        (check-equal? (hash-ref (list-ref js 0) 'text) "hello there")
        (check-equal? (hash-ref (list-ref js 1) 'name) "fake-model-1")
-       (check-equal? (hash-ref (list-ref js 2) 'text) "hello ")
-       (check-equal? (hash-ref (list-ref js 3) 'text) "world")
+       (check-equal? (hash-ref (list-ref js 3) 'text) "hello ")
+       (check-equal? (hash-ref (list-ref js 4) 'text) "world")
        ;; one line, two frames: the same id, the status moving
-       (check-equal? (hash-ref (list-ref js 4) 'id) "call-1")
-       (check-equal? (hash-ref (list-ref js 4) 'title) "read Tasks.rkt")
-       (check-equal? (hash-ref (list-ref js 4) 'status) "pending")
        (check-equal? (hash-ref (list-ref js 5) 'id) "call-1")
-       (check-equal? (hash-ref (list-ref js 5) 'status) "completed")
-       (check-equal? (hash-ref (list-ref js 6) 'stopReason) "end_turn")
+       (check-equal? (hash-ref (list-ref js 5) 'title) "read Tasks.rkt")
+       (check-equal? (hash-ref (list-ref js 5) 'status) "pending")
+       (check-equal? (hash-ref (list-ref js 6) 'id) "call-1")
+       (check-equal? (hash-ref (list-ref js 6) 'status) "completed")
+       (check-equal? (hash-ref (list-ref js 7) 'stopReason) "end_turn")
        ;; and the transcript is that turn, accumulated
        (check-true (wait-idle ag))
        (define t (agent-transcript ag))
@@ -225,7 +233,7 @@
        (agent-prompt! ag "read a file PERMISSION please")
        (define fs (frames-through frames "done"))
        (check-equal? (frame-types fs)
-                     '("user" "model" "chunk" "chunk" "tool" "tool" "done"))
+                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
        (check-equal? (hash-ref (cdr (last fs)) 'stopReason) "end_turn"))))
 
   ;; ---- which model ---------------------------------------------------------
@@ -241,7 +249,7 @@
        (agent-prompt! ag "hello there")
        (define fs (frames-through frames "done"))
        (check-equal? (frame-types fs)
-                     '("user" "model" "chunk" "chunk" "tool" "tool" "done"))
+                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
        (check-equal? (hash-ref (cdr (list-ref fs 1)) 'name) "fake-model-1")
        (check-true (wait-idle ag))
        (check-equal? (agent-model ag) "fake-model-1")
@@ -258,6 +266,42 @@
        (check-equal? (frame-types (frames-through frames "done"))
                      '("user" "chunk" "chunk" "tool" "tool" "done")))))
 
+  ;; ---- which slash commands ------------------------------------------------
+  ;;
+  ;; The agent's list, whole, every time it moves — and only when it moves. A
+  ;; command is invoked as ordinary prompt text, so this is the only thing the
+  ;; bridge does with one.
+
+  (test-case "the commands arrive with the session, stick, and follow a change"
+    (with-agent
+     (λ (ag frames _log)
+       ;; nothing has been asked yet, so nothing is offered
+       (check-equal? (agent-commands ag) '())
+       (agent-prompt! ag "hello there")
+       (define fs (frames-through frames "done"))
+       (check-equal? (frame-types fs)
+                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
+       ;; name and description, and nothing else: the argument hint the
+       ;; adapter sends is not something the panel draws
+       (define offered '(("fake-init" "start something" 2)
+                         ("fake-review" "look it over" 2)))
+       (check-equal? (command-pairs (hash-ref (cdr (list-ref fs 2)) 'commands)) offered)
+       (check-true (wait-idle ag))
+       (check-equal? (command-pairs (agent-commands ag)) offered)
+       ;; a session that learns a new set says so, in place
+       (agent-prompt! ag "COMMANDS please")
+       (define fs2 (frames-through frames "done"))
+       (check-equal? (frame-types fs2)
+                     '("user" "chunk" "commands" "chunk" "tool" "tool" "done"))
+       (define later '(("fake-later" "learned along the way" 2)))
+       (check-equal? (command-pairs (hash-ref (cdr (list-ref fs2 2)) 'commands)) later)
+       (check-true (wait-idle ag))
+       (check-equal? (command-pairs (agent-commands ag)) later)
+       ;; and a third turn offering the same set is silent about it
+       (agent-prompt! ag "still there")
+       (check-equal? (frame-types (frames-through frames "done"))
+                     '("user" "chunk" "chunk" "tool" "tool" "done")))))
+
   ;; ---- one turn at a time --------------------------------------------------
 
   (test-case "a second prompt mid-turn is a busy failure, and harms nothing"
@@ -267,6 +311,7 @@
        ;; wait for the turn to be really under way, not just accepted
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "user")
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "model")
+       (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "commands")
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "chunk")
        (define e
          (with-handlers ([exn:fail:op? values])
@@ -308,6 +353,7 @@
        (agent-prompt! ag "SLOW down")
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "user")
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "model")
+       (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "commands")
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "chunk")
        (agent-cancel! ag)
        (define done (cdr (next-frame frames)))
@@ -323,7 +369,7 @@
      (λ (ag frames _log)
        (agent-prompt! ag "CRASH now")
        (define fs (frames-through frames "error"))
-       (check-equal? (frame-types fs) '("user" "model" "chunk" "error"))
+       (check-equal? (frame-types fs) '("user" "model" "commands" "chunk" "error"))
        (check-true (string-contains? (hash-ref (cdr (last fs)) 'message) "exited")
                    (format "~a" (cdr (last fs))))
        (check-true (wait-idle ag))
@@ -353,7 +399,7 @@
      (λ (ag frames log)
        (agent-prompt! ag "hello there")
        (check-equal? (frame-types (frames-through frames "done"))
-                     '("user" "model" "chunk" "chunk" "tool" "tool" "done"))
+                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
        (check-true (wait-idle ag))
        (define noise
          (let loop ([n 0])
@@ -429,7 +475,7 @@
        (check-equal? body "" body)
        (define fs (events-through in "done"))
        (check-equal? (for/list ([f (in-list fs)]) (hash-ref f 'type))
-                     '("user" "model" "chunk" "chunk" "tool" "tool" "done"))
+                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
        (check-equal? (hash-ref (car fs) 'text) "hello there")
        (define done (last fs))
        (check-equal? (hash-ref done 'stopReason) "end_turn")
@@ -459,7 +505,7 @@
        ;; talking, which is the state this 409 is about.
        (check-equal? (for/list ([f (in-list (events-through in "chunk"))])
                        (hash-ref f 'type))
-                     '("user" "model" "chunk"))
+                     '("user" "model" "commands" "chunk"))
        (define-values (busy body) (POST port "/chat" '((text . "and another"))))
        (check-equal? busy 409 body)
        (check-true (string-contains? body "busy") body)
@@ -506,7 +552,11 @@
        (check-true (string-contains? body "data-status=\"completed\"") body)
        ;; the header is replayed too: the model frame was ephemeral, the model
        ;; the bridge learned from it is not
-       (check-true (string-contains? body "id=\"sf-chat-model\">fake-model-1<") body))))
+       (check-true (string-contains? body "id=\"sf-chat-model\">fake-model-1<") body)
+       ;; and so are the commands, so a reloaded panel completes without
+       ;; waiting for the agent to say anything again
+       (check-true (string-contains? body "fake-init") body)
+       (check-true (string-contains? body "fake-review") body))))
 
   (test-case "the page carries the panel, its script, and ONE sse connection"
     (with-server
@@ -518,6 +568,8 @@
        (check-true (string-contains? body "action=\"/chat\"") body)
        (check-true (string-contains? body "data-post=\"/chat/new\"") body)
        (check-true (string-contains? body "data-post=\"/chat/cancel\"") body)
+       ;; nothing has booted the agent, so there is nothing to complete yet
+       (check-true (string-contains? body "data-commands=\"[]\"") body)
        ;; the panel borrows the page's connection: it subscribes to the chat
        ;; event on the body's stream, and opens nothing of its own
        (check-true (string-contains? body "sse-swap=\"chat\"") body)

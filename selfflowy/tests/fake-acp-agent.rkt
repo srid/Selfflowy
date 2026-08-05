@@ -15,6 +15,7 @@
 ;;   SLOW         dawdle between chunks, long enough to cancel
 ;;   PERMISSION   ask session/request_permission and wait for the answer
 ;;   MODEL        switch models mid-turn (a config_option_update)
+;;   COMMANDS     offer a different command list mid-turn
 ;;
 ;; Every turn also writes one line to stderr: the bridge drains that pipe into
 ;; the server's log, and a bridge that did not would eventually block here.
@@ -76,6 +77,16 @@
               'options (list (hash 'value "fake-model-1" 'name "fake-model-1")
                              (hash 'value "fake-model-2" 'name "fake-model-2")))))
 
+;; The slash commands this session offers, in the adapter's shape: `input` is
+;; an argument hint, and is null for a command that takes none.
+(define commands
+  (box (list (hash 'name "fake-init"
+                   'description "start something"
+                   'input (json-null))
+             (hash 'name "fake-review"
+                   'description "look it over"
+                   'input (hash 'hint "[deep]")))))
+
 ;; The permission answer the turn is waiting for, posted by the main loop.
 (define permission-ch (make-channel))
 
@@ -95,6 +106,10 @@
 (define (chunk! text)
   (update! (hash 'sessionUpdate "agent_message_chunk"
                  'content (hash 'type "text" 'text text))))
+
+(define (commands!)
+  (update! (hash 'sessionUpdate "available_commands_update"
+                 'availableCommands (unbox commands))))
 
 ;; Sleep in slices so a cancel lands promptly. -> #t if it ran to the end.
 (define (dawdle seconds)
@@ -131,6 +146,11 @@
     (set-box! model "fake-model-2")
     (update! (hash 'sessionUpdate "config_option_update"
                    'configOptions (config-options))))
+  (when (string-contains? text "COMMANDS")
+    (set-box! commands (list (hash 'name "fake-later"
+                                   'description "learned along the way"
+                                   'input (json-null))))
+    (commands!))
   (when (string-contains? text "PERMISSION")
     (define answer (ask-permission!))
     (unless answer
@@ -179,7 +199,13 @@
     [(equal? method "session/new")
      (respond! id (hash 'sessionId session-id 'configOptions (config-options)))]
     [(equal? method "session/set_mode")
-     (respond! id (hash))]
+     (respond! id (hash))
+     ;; The commands go out once the session exists — the adapter sends them
+     ;; from a timer right after session/new returns, which is somewhere in
+     ;; here. Pinned to set_mode so the order a test sees is the same every
+     ;; run: the model (read off the session/new result) first, then these,
+     ;; and both before the first prompt can be answered.
+     (commands!)]
     [(equal? method "session/cancel") (set-box! cancelled? #t)]
     [(equal? method "session/prompt")
      (define text (prompt-text params))

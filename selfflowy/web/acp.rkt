@@ -63,6 +63,7 @@
           [agent-stop! (-> acp-agent? void?)]
           [agent-busy? (-> acp-agent? boolean?)]
           [agent-model (-> acp-agent? (or/c string? #f))]
+          [agent-commands (-> acp-agent? (listof hash?))]
           [agent-transcript (-> acp-agent? (listof hash?))]))
 
 ;; The SSE event name chat frames ride under. One owner: the page that
@@ -128,7 +129,7 @@
 (struct acp-agent (command cwd broadcast log-port cust
                    sema boot-sema out-sema
                    [sp #:mutable] [stdin #:mutable] [stdout #:mutable]
-                   [session #:mutable] [model #:mutable]
+                   [session #:mutable] [model #:mutable] [commands #:mutable]
                    [next-id #:mutable] [pending #:mutable]
                    [busy? #:mutable] [live-turn #:mutable]
                    [cancel-pending? #:mutable]
@@ -159,7 +160,7 @@
              (make-custodian)
              (make-semaphore 1) (make-semaphore 1) (make-semaphore 1)
              #f #f #f
-             #f #f
+             #f #f '()
              0 (hash)
              #f #f
              #f
@@ -212,6 +213,10 @@
 ;;                                            the moment the agent says so —
 ;;                                            with the session, and again if
 ;;                                            it changes under one
+;;   {"type":"commands","commands":[...]}     the slash commands the agent
+;;                                            offers, the WHOLE list each
+;;                                            time (a panel replaces what it
+;;                                            had); each one {name,description}
 
 (define (broadcast! ag js)
   (with-handlers ([exn:fail? (λ (e) (log-line ag (format "broadcast failed: ~a" (exn-message e))))])
@@ -293,6 +298,45 @@
         (unless (equal? name (acp-agent-model ag))
           (set-acp-agent-model! ag name)
           (broadcast! ag (hash 'type "model" 'name name)))))))
+
+;; ---- which slash commands ----------------------------------------------------
+;;
+;; The agent's own command list, pushed as an `available_commands_update`: once
+;; just after session/new, and again whenever the set moves under a live
+;; session (a skill discovered while the agent works somewhere new). It is the
+;; WHOLE list every time — a replacement, not a delta — so the bridge keeps the
+;; last one and the frame carries all of it.
+;;
+;; An entry on the wire is {name, description, input}. `input` is an argument
+;; HINT for a command that takes one ("[low|medium|high]"), and it is dropped
+;; here: the panel completes a NAME and the agent parses the rest of the line.
+;; Nothing about invoking changes — a command is ordinary prompt text that
+;; starts with "/name".
+
+(define (agent-commands ag)
+  (with-state ag (λ () (acp-agent-commands ag))))
+
+;; Only the two strings a panel draws, and only for entries that have a name.
+(define (available-commands cmds)
+  (if (list? cmds)
+      (for*/list ([c (in-list cmds)]
+                  #:when (hash? c)
+                  [name (in-value (string-or-false (hash-ref c 'name #f)))]
+                  #:when name)
+        (hash 'name name
+              'description (or (string-or-false (hash-ref c 'description #f)) "")))
+      '()))
+
+;; Learned, never configured — same discipline as the model: the frame goes out
+;; only when the list actually moved, so a session that re-announces the same
+;; commands on every reset says nothing.
+(define (learn-commands! ag cmds)
+  (define commands (available-commands cmds))
+  (with-state ag
+    (λ ()
+      (unless (equal? commands (acp-agent-commands ag))
+        (set-acp-agent-commands! ag commands)
+        (broadcast! ag (hash 'type "commands" 'commands commands))))))
 
 ;; ---- the wire --------------------------------------------------------------
 
@@ -470,6 +514,9 @@
     ;; the whole config set, resent: only the model is read out of it
     [(equal? kind "config_option_update")
      (learn-model! ag (hash-ref u 'configOptions '()))]
+    ;; the whole slash-command list, resent: what a panel completes with
+    [(equal? kind "available_commands_update")
+     (learn-commands! ag (hash-ref u 'availableCommands '()))]
     [(member kind ignored-update-kinds) (void)]
     [else (log-kind-once! ag (format "session/update ~a" kind))]))
 

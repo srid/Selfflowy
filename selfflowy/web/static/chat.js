@@ -9,7 +9,7 @@
 // chunks accumulated.
 (function(){
   var KEY='selfflowy.chat';
-  var panel,dock,body,form,input,sink,turn,agentEl,modelEl;
+  var panel,dock,body,form,input,sink,turn,agentEl,modelEl,pop;
 
   // ---- open / closed (same shape as collapse.js: a class, remembered) ----
   //
@@ -29,6 +29,8 @@
     // Same reason as above: a turn running behind a closed panel is a cue the
     // toggle wears, and the toggle reads it off the dock.
     if(dock)dock.classList.toggle('is-busy',b);
+    // nothing to complete into an input nobody can type in
+    if(b)closePop();
   }
 
   // ---- the message body --------------------------------------------------
@@ -82,6 +84,93 @@
     el.querySelector('.sf-chat-tool-title').textContent=title;
   }
 
+  // ---- slash commands ----------------------------------------------------
+  //
+  // The agent's own command list: server-rendered onto the panel as
+  // data-commands (a reloaded page completes right away) and replaced live by
+  // a `commands` frame. Typing "/" opens a popover over the input row; picking
+  // a row only WRITES "/name " into the input — a command is invoked by
+  // sending ordinary prompt text, so nothing about the send path changes.
+  var commands=[],matches=[],picked=-1;
+
+  // Two strings per command, and only what has a name: this list is drawn.
+  function setCommands(list){
+    commands=[];
+    for(var i=0;list&&i<list.length;i++){
+      var c=list[i];
+      if(c&&typeof c.name==='string')
+        commands.push({name:c.name,
+                       description:typeof c.description==='string'?c.description:''});
+    }
+  }
+
+  function popOpen(){return !!pop&&!pop.hidden}
+
+  function closePop(){
+    if(pop){pop.hidden=true;pop.textContent=''}
+    matches=[];picked=-1;
+  }
+
+  // What the input is asking to complete: everything after a leading slash, or
+  // null when this is not a command line at all. A line that has moved on to
+  // arguments ("/foo bar") matches no name, and that closes the popover on the
+  // same rule as a typo does.
+  function typedPrefix(){
+    return input.value.charAt(0)==='/'?input.value.slice(1):null;
+  }
+
+  function match(prefix){
+    var p=prefix.toLowerCase(),out=[];
+    for(var i=0;i<commands.length;i++)
+      if(commands[i].name.toLowerCase().indexOf(p)===0)out.push(commands[i]);
+    return out;
+  }
+
+  function drawPop(list){
+    if(!pop||!list.length){closePop();return}
+    pop.textContent='';
+    for(var i=0;i<list.length;i++){
+      var row=line('sf-chat-cmd');
+      row.setAttribute('data-index',String(i));
+      row.appendChild(line('sf-chat-cmd-name','/'+list[i].name));
+      row.appendChild(line('sf-chat-cmd-desc',list[i].description));
+      pop.appendChild(row);
+    }
+    matches=list;
+    pop.hidden=false;
+    highlight(0);
+  }
+
+  // Whatever the input says right now, filtered. An empty prefix is the whole
+  // list, which is what the commands button asks for.
+  function redraw(){drawPop(match(typedPrefix()||''))}
+
+  // What the input says, or nothing at all: this is the typing path, so a line
+  // that stopped being a command line closes the popover.
+  function refresh(){
+    var p=typedPrefix();
+    if(p===null){closePop();return}
+    drawPop(match(p));
+  }
+
+  function highlight(i){
+    var rows=pop.children;
+    if(!rows.length)return;
+    picked=(i+rows.length)%rows.length;
+    for(var j=0;j<rows.length;j++)rows[j].classList.toggle('is-picked',j===picked);
+    if(rows[picked].scrollIntoView)rows[picked].scrollIntoView({block:'nearest'});
+  }
+
+  // Accepted, not sent: the trailing space is where the arguments go, and the
+  // caret stays where it was typing.
+  function accept(i){
+    var c=matches[i];
+    if(!c)return;
+    input.value='/'+c.name+' ';
+    closePop();
+    input.focus();
+  }
+
   function frame(f){
     if(f.type==='user'){startTurn(f.text)}
     else if(f.type==='chunk'){
@@ -112,6 +201,12 @@
     // again if it changes under one. The page renders whatever was known then.
     else if(f.type==='model'){
       if(modelEl)modelEl.textContent=typeof f.name==='string'?f.name:'';
+    }
+    // the whole command list, replaced. An open popover re-filters in place
+    // rather than sitting there offering commands the agent no longer has.
+    else if(f.type==='commands'){
+      setCommands(f.commands);
+      if(popOpen())redraw();
     }
   }
 
@@ -149,6 +244,15 @@
     input=form.querySelector('.sf-chat-input');
     sink=document.getElementById('sf-chat-sink');
     modelEl=document.getElementById('sf-chat-model');
+    // What the server knew when it drew the page. Bad JSON is no commands,
+    // not a broken panel.
+    try{setCommands(JSON.parse(panel.getAttribute('data-commands')||'[]'))}catch(e){}
+    // The popover belongs to the input row and to nothing else, so it is made
+    // here rather than rendered: there is no server state in it.
+    pop=line('sf-chat-pop');
+    pop.id='sf-chat-pop';
+    pop.hidden=true;
+    form.appendChild(pop);
     var open='0';
     try{open=localStorage.getItem(KEY)||'0'}catch(e){}
     setOpen(open==='1');
@@ -165,6 +269,9 @@
 
     document.addEventListener('click',function(e){
       var t=e.target.closest('[data-post],[data-chat-toggle]');
+      // a click anywhere but the popover's own surface (or the input it
+      // completes) puts it away
+      if(!t&&!(pop&&pop.contains(e.target))&&e.target!==input)closePop();
       if(!t)return;
       e.preventDefault();
       // Two buttons, one path: the floating toggle and the header's ×.
@@ -183,7 +290,29 @@
       var text=input.value.trim();
       if(!text)return;
       input.value='';
+      closePop();
       post(form.getAttribute('action'),text);
+    });
+
+    input.addEventListener('input',refresh);
+
+    // The popover owns these keys only while it is open. Closed, every one of
+    // them is the form's — a plain Enter sends, the way it always did.
+    input.addEventListener('keydown',function(e){
+      if(!popOpen())return;
+      if(e.key==='ArrowDown'){e.preventDefault();highlight(picked+1)}
+      else if(e.key==='ArrowUp'){e.preventDefault();highlight(picked-1)}
+      else if(e.key==='Enter'||e.key==='Tab'){e.preventDefault();accept(picked)}
+      else if(e.key==='Escape'){e.preventDefault();closePop()}
+    });
+
+    // mousedown, not click: it runs before the input loses focus, and the
+    // default (that blur) is what accept() would have to undo.
+    pop.addEventListener('mousedown',function(e){
+      var row=e.target.closest('.sf-chat-cmd');
+      if(!row)return;
+      e.preventDefault();
+      accept(Number(row.getAttribute('data-index')));
     });
 
     // The htmx sse extension would swap the frame's JSON into #sf-chat-sink.

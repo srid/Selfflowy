@@ -176,7 +176,8 @@
                           #:new-href chat-new-href
                           #:cancel-href chat-cancel-href
                           #:event acp-event-name
-                          #:model (agent-model agent))))
+                          #:model (agent-model agent)
+                          #:commands (agent-commands agent))))
 
 ;; The bridge's failure kinds, as statuses: 'busy is a second prompt while a
 ;; turn runs, 'validation is an agent that has been stopped. Terse text/plain

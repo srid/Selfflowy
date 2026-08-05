@@ -22,6 +22,7 @@
          racket/path
          racket/string
          racket/runtime-path
+         (only-in json jsexpr->string)
          (only-in xml cdata xexpr->string)
          (except-in selfflowy/lang/expander #%module-begin)
          ;; the resolved shape of a mirror site (core owns the binding)
@@ -80,7 +81,7 @@
            (->* ((listof hash?)
                  #:send-href string? #:new-href string? #:cancel-href string?
                  #:event string?)
-                (#:model (or/c string? #f))
+                (#:model (or/c string? #f) #:commands (listof hash?))
                 list?)]
           [render-empty-pane (-> string? #:home-href string? list?)]
           [render-error-banner (->* (string?) (#:where (or/c string? #f)) list?)]
@@ -593,7 +594,8 @@
                            #:new-href new-href
                            #:cancel-href cancel-href
                            #:event event
-                           #:model [model #f])
+                           #:model [model #f]
+                           #:commands [commands '()])
   ;; A turn was still running when this page was rendered: the panel comes up
   ;; in that state (input disabled, stop showing) rather than idle.
   (define busy?
@@ -602,7 +604,12 @@
         (button ((type "button") (class "sf-chat-open") (data-chat-toggle "")
                  (aria-label "open the agent panel"))
                 ">_ agent")
-        (aside ((class ,(classes "sf-chat" (and busy? "is-busy"))) (id "sf-chat"))
+        ;; The agent's slash commands, replayed onto the panel: chat.js reads
+        ;; them at init so a reloaded page completes immediately, and a
+        ;; `commands` frame replaces them from there. JSON in an attribute —
+        ;; the xexpr layer is what escapes it, same as any other string here.
+        (aside ((class ,(classes "sf-chat" (and busy? "is-busy"))) (id "sf-chat")
+                (data-commands ,(jsexpr->string commands)))
                (div ((class "sf-chat-head"))
                     ;; Which model, when the bridge has heard one — never a
                     ;; placeholder. Its own span, and the separator is the
