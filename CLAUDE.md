@@ -4,17 +4,12 @@ Read README.md and docs/*.md first. This file is only what you can't infer.
 
 ## HARD RULES
 
-* Personal outline DATA lives outside the repo: `$SELFFLOWY_HOME`
-  (default `~/Dropbox/Selfflowy-Srid/`) — `Tasks.rkt`, `Daily.rkt` (+
-  `Daily/` fragments). NEVER commit those. NEVER invent content for them;
-  treat them as user-owned. Re-validate after any edit. `examples/` is demo
-  fiction only (e.g. `examples/Daily.rkt` + fragments); CI uses examples
-  only, never Dropbox paths. `Roadmap.rkt` lives AT THE REPO ROOT instead —
-  it's public, edited and committed like any other repo file (still: never
-  invent content the user didn't ask for; run `selfflowy check` after
-  editing it). The author's private `Tasks.rkt` `@include`s the repo's
-  `Roadmap.rkt`, so breaking `Roadmap.rkt` breaks their whole outline —
-  check it.
+* Personal outline DATA lives outside the repo: `$SELFFLOWY_HOME` (default
+  `~/Dropbox/Selfflowy-Srid/`) — `Tasks.rkt`, `Daily.rkt` (+ `Daily/`).
+  NEVER commit or invent content for these; user-owned, re-validate after
+  edits. `examples/` is demo fiction for CI, never Dropbox paths.
+  `Roadmap.rkt` is public, at repo root, committed and re-validated like
+  any file — the author's `Tasks.rkt` `@include`s it.
 * No hand-rolling where a maintained library exists. In use: racket/cmdline,
   json (write-json/read-json), xml (xexprs), gregor (dates), markdown
   (title/note formatting in the web view only).
@@ -50,12 +45,10 @@ Read README.md and docs/*.md first. This file is only what you can't infer.
   map kind -> exit code. The web mutation routes will call the same ops.
 * Node keys are minted in the load layer, not the expander (see docs/cli.md);
   store.rkt owns snapshots and binds mirror sites before anything draws them.
-* Live view is three parts in web/, none of which knows the others: store
-  (what the outlines ARE), watch.rkt (WHEN they moved), events.rkt (a generic
-  SSE hub: event names + payload strings, no outline vocabulary). serve.rkt is
-  the only place they meet.
-* The ACP bridge is web/acp.rkt: one subprocess, one turn at a time, chat
-  frames out through that same hub. Nothing else spells "session/prompt".
+* Live view: store (what) -> web/watch.rkt (when) -> web/events.rkt (generic
+  SSE hub); they meet only in serve.rkt.
+* web/acp.rkt is the ACP bridge: one subprocess, one turn at a time, chat
+  frames through the same hub. Nothing else spells ACP.
 * Core must build without web/: file naming is selfflowy/paths (file-label,
   key-label), not a renderer helper.
 * JSON is two modules, two version counters: json/model (what a node/tree IS,
@@ -66,12 +59,10 @@ Read README.md and docs/*.md first. This file is only what you can't infer.
 * just check / tree / agenda / serve / test — recipes handle PLTUSERHOME +
   raco link (`run`/`watch` alias `serve`). Racket comes from the nix dev
   shell (nixpkgs 9.2). Don't fight raco setup; PLTUSERHOME must be writable.
-* Branch and PR for EVERY change, agents included: work on a branch, small
-  commits one concern each, open a PR against master, CI green before it
-  merges. Never push to master directly — branch protection refuses it.
+* Branch + PR for every change (agents included); CI green before merge.
+  Master rejects direct pushes.
 * Other agents work this repo concurrently (Grok in a kolu terminal). git pull
-  --rebase before starting, and rebase the branch on master before the PR;
-  don't assume a clean tree is yours.
+  --rebase before starting; don't assume a clean tree is yours.
 * Driving that terminal: `padi-tui status` lists terminals + agent state;
   `padi-tui wait <id> --until awaiting,waiting` blocks until its turn ends.
   `kaval-tui snapshot <id>` reads the screen; to prompt it: `kaval-tui send
