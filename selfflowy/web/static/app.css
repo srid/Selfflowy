@@ -549,6 +549,19 @@ button.sf-check:hover { color: var(--green); }
 
 .sf-chat-open:hover { color: var(--ink); border-color: var(--dim); }
 
+/* a turn is running behind a closed panel: the toggle breathes so working is
+   visible without opening it. The ring is the accent color at low alpha,
+   expanding and fading — no bounce, no color change on the button itself. */
+.sf-chat-dock.is-busy .sf-chat-open {
+  border-color: var(--green);
+  animation: sf-chat-glow 1.8s ease-in-out infinite;
+}
+
+@keyframes sf-chat-glow {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 45%, transparent); }
+  50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--green) 0%, transparent); }
+}
+
 .sf-chat {
   position: fixed;
   top: 0;
@@ -742,4 +755,7 @@ body.sf-body:has(.sf-chat.is-open) .sf-main {
 
 @media (prefers-reduced-motion: reduce) {
   .sf-chat-tool .sf-chat-tool-glyph { animation: none; }
+
+  /* the border still marks busy; only the motion drops out */
+  .sf-chat-dock.is-busy .sf-chat-open { animation: none; }
 }

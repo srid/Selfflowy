@@ -20,6 +20,10 @@
   function setBusy(b){
     panel.classList.toggle('is-busy',b);
     input.disabled=b;
+    // The toggle lives outside the panel it opens, so it needs its own cue:
+    // the dock (its shared parent) carries the class the button's CSS reads.
+    var dock=panel.closest('.sf-chat-dock');
+    if(dock)dock.classList.toggle('is-busy',b);
   }
 
   // ---- the message body --------------------------------------------------
