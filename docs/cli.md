@@ -241,6 +241,16 @@ selfflowy serve http://127.0.0.1:8080 files: /.../examples/Example.rkt
 - `--bind ADDR` — default `127.0.0.1`. `--bind ""` listens on all interfaces.
 - **No auth.** The network is the auth: put it behind Tailscale or Caddy.
 
+**`SELFFLOWY_ACP_AGENT`** is an absolute path to an executable that speaks the
+[Agent Client Protocol](https://agentclientprotocol.com/) on stdio; `serve`
+spawns it as a subprocess. There is no fallback and no PATH lookup: with the
+variable unset (or pointing at something that is not executable) the server
+refuses to start. Nix sets it for you — `nix run` / `nix run .#serve` and the
+dev shell (so `just serve`) default it to the bundled Claude Code adapter,
+`packages.acp-agent` (`nix build .#acp-agent`), which is vendored from npm and
+pinned, never fetched at run time. Exporting the variable yourself wins, which
+is how you point `serve` at a different agent.
+
 Routes:
 
 | Route | Body |
