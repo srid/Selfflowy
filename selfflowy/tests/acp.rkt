@@ -238,8 +238,9 @@
 
   ;; ---- which model ---------------------------------------------------------
   ;;
-  ;; The agent's word, never the bridge's guess: a session config option, in
-  ;; the session/new result and again in a config_option_update. Both paths.
+  ;; The agent's word, never the bridge's guess — and it says it two ways: the
+  ;; session config option (what was PICKED) and the CLI's own init message
+  ;; (what is RUNNING). They part company at a `/model` slash command.
 
   (test-case "the model arrives with the session, sticks, and follows a switch"
     (with-agent
@@ -265,6 +266,61 @@
        (agent-prompt! ag "still there")
        (check-equal? (frame-types (frames-through frames "done"))
                      '("user" "chunk" "chunk" "tool" "tool" "done")))))
+
+  ;; A `/model` slash command never reaches the adapter as a config change —
+  ;; the wrapped CLI handles it, and the config option goes on naming the model
+  ;; the session started on. The live model is in the CLI's `system`/`init`
+  ;; message, which the adapter forwards only because session/new asked for it.
+  ;; Without both halves the header says "Fable" while every turn runs Opus.
+  (test-case "a live model switch that never touches the config option lands anyway"
+    (with-agent
+     (λ (ag frames _log)
+       (agent-prompt! ag "hello there")
+       (define fs (frames-through frames "done"))
+       ;; the first init agrees with the config option, so it is a baseline and
+       ;; says nothing: one `model` frame for the session, not two
+       (check-equal? (frame-types fs)
+                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
+       (check-true (wait-idle ag))
+       (check-equal? (agent-model ag) "fake-model-1")
+       ;; the slash command: a fresh init, no config_option_update
+       (agent-prompt! ag "SLASH /model please")
+       (define fs2 (frames-through frames "done"))
+       (check-equal? (frame-types fs2)
+                     '("user" "chunk" "model" "chunk" "tool" "tool" "done"))
+       ;; labelled from the picker, which is what a header wants
+       (check-equal? (hash-ref (cdr (list-ref fs2 2)) 'name) "Fake Model Three")
+       (check-true (wait-idle ag))
+       (check-equal? (agent-model ag) "Fake Model Three")
+       ;; and the next turn, running the same model, is silent about it
+       (agent-prompt! ag "still there")
+       (check-equal? (frame-types (frames-through frames "done"))
+                     '("user" "chunk" "chunk" "tool" "tool" "done"))
+       (check-equal? (agent-model ag) "Fake Model Three"))))
+
+  ;; A running model the picker never offered: the raw id is what a header
+  ;; gets. Truthful, and the log says so once so the spelling is findable.
+  (test-case "a live model the picker does not offer is shown raw, and logged once"
+    (with-agent
+     (λ (ag frames log)
+       (agent-prompt! ag "hello there")
+       (frames-through frames "done")
+       (check-true (wait-idle ag))
+       (agent-prompt! ag "UNLISTED please")
+       (define fs (frames-through frames "done"))
+       (check-equal? (frame-types fs)
+                     '("user" "chunk" "model" "chunk" "tool" "tool" "done"))
+       (check-equal? (hash-ref (cdr (list-ref fs 2)) 'name) "claude-fake-9[1m]")
+       (check-true (wait-idle ag))
+       (check-equal? (agent-model ag) "claude-fake-9[1m]")
+       (define lines (get-output-string log))
+       (check-true (string-contains? lines "claude-fake-9[1m]") lines)
+       ;; every turn re-announces it; the log says it once
+       (agent-prompt! ag "still there")
+       (frames-through frames "done")
+       (check-true (wait-idle ag))
+       (define n (length (regexp-match* #rx"does not offer" (get-output-string log))))
+       (check-equal? n 1 (get-output-string log)))))
 
   ;; ---- which slash commands ------------------------------------------------
   ;;

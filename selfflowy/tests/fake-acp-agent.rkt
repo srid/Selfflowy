@@ -15,6 +15,10 @@
 ;;   SLOW         dawdle between chunks, long enough to cancel
 ;;   PERMISSION   ask session/request_permission and wait for the answer
 ;;   MODEL        switch models mid-turn (a config_option_update)
+;;   SLASH        switch the LIVE model mid-turn without touching the config
+;;                option, the way a `/model` slash command does — the change
+;;                shows up only in a re-issued `system`/`init`
+;;   UNLISTED     the same, to a model the picker does not offer
 ;;   COMMANDS     offer a different command list mid-turn
 ;;
 ;; Every turn also writes one line to stderr: the bridge drains that pipe into
@@ -62,7 +66,7 @@
 ;; both in the reading loop, so the two stay in the order they arrived.
 (define cancelled? (box #f))
 
-;; Which model this session is running. Reported the way a Claude Code adapter
+;; Which model this session PICKED. Reported the way a Claude Code adapter
 ;; reports it: a session CONFIG OPTION, in the session/new result and again in
 ;; a config_option_update when it moves.
 (define model (box "fake-model-1"))
@@ -75,7 +79,47 @@
               'type "select"
               'currentValue (unbox model)
               'options (list (hash 'value "fake-model-1" 'name "fake-model-1")
-                             (hash 'value "fake-model-2" 'name "fake-model-2")))))
+                             (hash 'value "fake-model-2" 'name "fake-model-2")
+                             (hash 'value "fake-model-3" 'name "Fake Model Three")))))
+
+;; Which model this session is actually RUNNING. A `/model` slash command is
+;; handled inside the wrapped CLI, so it moves this and NOT the config option
+;; above — exactly the split that let a chat header go stale. It surfaces only
+;; in the CLI's own `system`/`init` message, which the adapter forwards
+;; verbatim to a client that asked for it.
+(define live-model (box "fake-model-1"))
+
+;; Whether session/new asked for raw CLI messages, and for which kinds. The
+;; real adapter takes `_meta.claudeCode.emitRawSDKMessages` as either #t or a
+;; list of {type, subtype?} filters; nothing is forwarded to a client that did
+;; not ask, which is what makes the opt-in itself testable.
+(define raw-filter (box #f))
+
+(define (raw-init-wanted?)
+  (define f (unbox raw-filter))
+  (cond
+    [(eq? f #t) #t]
+    [(list? f)
+     (for/or ([e (in-list f)])
+       (and (hash? e)
+            (equal? (hash-ref e 'type #f) "system")
+            (member (hash-ref e 'subtype #f) (list #f (json-null) "init"))
+            #t))]
+    [else #f]))
+
+;; The CLI announces itself at the start of every turn, and again whenever it
+;; reinitializes — which is what changing the model does. Only `model` is
+;; interesting here; the rest is the shape the real message has.
+(define (init!)
+  (when (raw-init-wanted?)
+    (notify! "_claude/sdkMessage"
+             (hash 'sessionId session-id
+                   'message (hash 'type "system"
+                                  'subtype "init"
+                                  'session_id session-id
+                                  'model (unbox live-model)
+                                  'permissionMode "bypassPermissions"
+                                  'slash_commands (list "model"))))))
 
 ;; The slash commands this session offers, in the adapter's shape: `input` is
 ;; an argument hint, and is null for a command that takes none.
@@ -138,6 +182,7 @@
 ;; and would swallow it.
 (define (run-turn! id text)
   (noise! (format "fake-acp-agent: turn for ~s" text))
+  (init!)
   (chunk! "hello ")
   (when (string-contains? text "CRASH")
     (flush-output (current-output-port))
@@ -146,6 +191,14 @@
     (set-box! model "fake-model-2")
     (update! (hash 'sessionUpdate "config_option_update"
                    'configOptions (config-options))))
+  (when (string-contains? text "SLASH")
+    ;; the CLI switched under the adapter: no config_option_update, just a
+    ;; fresh init on the way back out of the reinitialize
+    (set-box! live-model "fake-model-3")
+    (init!))
+  (when (string-contains? text "UNLISTED")
+    (set-box! live-model "claude-fake-9[1m]")
+    (init!))
   (when (string-contains? text "COMMANDS")
     (set-box! commands (list (hash 'name "fake-later"
                                    'description "learned along the way"
@@ -197,6 +250,9 @@
                         'agentCapabilities (hash 'loadSession #f)
                         'agentInfo (hash 'name "fake-acp-agent" 'version "1")))]
     [(equal? method "session/new")
+     (define meta (hash-ref params '_meta (hash)))
+     (define claude (if (hash? meta) (hash-ref meta 'claudeCode (hash)) (hash)))
+     (set-box! raw-filter (if (hash? claude) (hash-ref claude 'emitRawSDKMessages #f) #f))
      (respond! id (hash 'sessionId session-id 'configOptions (config-options)))]
     [(equal? method "session/set_mode")
      (respond! id (hash))

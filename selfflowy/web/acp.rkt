@@ -78,6 +78,27 @@
 
 (define protocol-version 1)
 
+;; What `session/new` asks the Claude Code adapter to forward, and the
+;; notification it forwards it under.
+;;
+;; The adapter wraps the Claude Code CLI, and a `/model` slash command is
+;; handled INSIDE that CLI: the adapter never sees it as a config change, so
+;; nothing is resent as a `config_option_update` and its `configOptions` keep
+;; naming the model the session started on (see "which model" below). The live
+;; model is in the CLI's own `system`/`init` message, which the adapter
+;; forwards verbatim — but only to a client that asked, and only for the
+;; message kinds it asked for. This is the narrowest possible ask: one small
+;; message, once per turn (and again after the CLI reinitializes, which is what
+;; a model switch does).
+;;
+;; An agent that is not the Claude Code adapter ignores `_meta` and nothing
+;; here changes: the config option is still read, and still enough.
+(define session-meta
+  (hash 'claudeCode
+        (hash 'emitRawSDKMessages (list (hash 'type "system" 'subtype "init")))))
+
+(define sdk-message-method "_claude/sdkMessage")
+
 ;; Permissions are a session MODE, asked for once per session. A refusal is
 ;; not fatal: request_permission is answered anyway.
 (define bypass-mode "bypassPermissions")
@@ -129,7 +150,10 @@
 (struct acp-agent (command cwd broadcast log-port cust
                    sema boot-sema out-sema
                    [sp #:mutable] [stdin #:mutable] [stdout #:mutable]
-                   [session #:mutable] [model #:mutable] [commands #:mutable]
+                   [session #:mutable]
+                   [model #:mutable] [model-options #:mutable]
+                   [config-model #:mutable] [live-model #:mutable]
+                   [commands #:mutable]
                    [next-id #:mutable] [pending #:mutable]
                    [busy? #:mutable] [live-turn #:mutable]
                    [cancel-pending? #:mutable]
@@ -160,7 +184,9 @@
              (make-custodian)
              (make-semaphore 1) (make-semaphore 1) (make-semaphore 1)
              #f #f #f
-             #f #f '()
+             #f
+             #f '() #f #f
+             '()
              0 (hash)
              #f #f
              #f
@@ -211,8 +237,10 @@
 ;;   {"type":"reset"}                         new chat: panels clear
 ;;   {"type":"model","name"}                  which model the session runs,
 ;;                                            the moment the agent says so —
-;;                                            with the session, and again if
-;;                                            it changes under one
+;;                                            with the session, and again
+;;                                            whenever it moves under one, by
+;;                                            whatever means (see "which
+;;                                            model")
 ;;   {"type":"commands","commands":[...]}     the slash commands the agent
 ;;                                            offers, the WHOLE list each
 ;;                                            time (a panel replaces what it
@@ -256,30 +284,48 @@
 
 ;; ---- which model ------------------------------------------------------------
 ;;
-;; The agent reports its model as one of the session's CONFIG OPTIONS: the
-;; entry with id "model" carries the live model in `currentValue`, and the
-;; picker it came from in `options`. It arrives twice over — in the session/new
-;; result, and again in a `config_option_update` whenever anything in that set
-;; moves — so one reader serves both, and nothing here ever guesses a name.
+;; Two sources, because one of them is not enough.
+;;
+;;   * the session's CONFIG OPTIONS: the entry with id "model" carries the
+;;     picked model in `currentValue`, and the picker it came from in
+;;     `options`. It arrives in the session/new result and again in a
+;;     `config_option_update` whenever anything in that set moves. This is the
+;;     agent's word for what was CHOSEN.
+;;   * the LIVE model, in the CLI's own `system`/`init` message (forwarded
+;;     because session/new asked for it — see `session-meta`). This is what the
+;;     session is actually RUNNING.
+;;
+;; They disagree after a `/model` slash command: that is handled inside the
+;; wrapped CLI, so the adapter never learns of it and keeps reporting the model
+;; the session started on, forever. Reading only the config option leaves a
+;; header that says "Fable" while every turn runs on Opus.
+;;
+;; Whichever source moved last wins, and each is debounced against its OWN
+;; previous value: the picker resends its whole set whenever anything in it
+;; moves (an effort change, a fast-mode toggle), and the live id repeats on
+;; every turn. The first live id is a BASELINE — it agrees with the config
+;; option by construction, and a session announcing itself twice would say the
+;; same thing in two spellings.
+;;
+;; Nothing here guesses. A live id is labelled from the picker when the picker
+;; offers it and shown raw when it does not; the raw id is truthful, and a
+;; bridge that fuzzy-matched "claude-opus-5[1m]" onto some nearby row would be
+;; inventing an answer.
 
 (define model-config-id "model")
 
 (define (agent-model ag)
   (with-state ag (λ () (acp-agent-model ag))))
 
-;; The picker's own label ("Fable", "Opus") is what the agent calls the model,
-;; and it is what a header wants; the raw id is the fallback for a session
-;; running something the picker no longer offers.
-(define (config-options-model opts)
+;; -> the model entry of a configOptions set, or #f.
+(define (model-config opts)
   (and (list? opts)
        (for/or ([o (in-list opts)]
                 #:when (hash? o))
-         (and (equal? (hash-ref o 'id #f) model-config-id)
-              (let ([current (string-or-false (hash-ref o 'currentValue #f))])
-                (and current
-                     (or (option-name (hash-ref o 'options '()) current)
-                         current)))))))
+         (and (equal? (hash-ref o 'id #f) model-config-id) o))))
 
+;; The picker's own label ("Fable", "Opus") is what the agent calls the model,
+;; and it is what a header wants.
 (define (option-name options value)
   (and (list? options)
        (for/or ([o (in-list options)]
@@ -287,17 +333,45 @@
          (and (equal? (hash-ref o 'value #f) value)
               (string-or-false (hash-ref o 'name #f))))))
 
-;; Learned, never configured. The frame goes out only when the name actually
-;; moved: a session that reports the same model on every reset would otherwise
-;; tell every panel the same thing over and over.
-(define (learn-model! ag opts)
-  (define name (config-options-model opts))
-  (when name
+;; The one place the header's model changes. Callers hold `sema`.
+(define (show-model! ag name)
+  (unless (equal? name (acp-agent-model ag))
+    (set-acp-agent-model! ag name)
+    (broadcast! ag (hash 'type "model" 'name name))))
+
+;; The picked model, and the picker to label the live one with.
+(define (learn-config-model! ag opts)
+  (define o (model-config opts))
+  (when o
+    (define options (let ([os (hash-ref o 'options '())]) (if (list? os) os '())))
+    (define current (string-or-false (hash-ref o 'currentValue #f)))
+    (define name (and current (or (option-name options current) current)))
     (with-state ag
       (λ ()
-        (unless (equal? name (acp-agent-model ag))
-          (set-acp-agent-model! ag name)
-          (broadcast! ag (hash 'type "model" 'name name)))))))
+        (set-acp-agent-model-options! ag options)
+        (when (and name (not (equal? name (acp-agent-config-model ag))))
+          (set-acp-agent-config-model! ag name)
+          (show-model! ag name))))))
+
+;; The model a turn actually ran on, off `system`/`init`.
+(define (learn-live-model! ag id)
+  (define unknown?
+    (with-state ag
+      (λ ()
+        (cond
+          [(equal? id (acp-agent-live-model ag)) #f]
+          [else
+           (define baseline? (not (acp-agent-live-model ag)))
+           (set-acp-agent-live-model! ag id)
+           (define name (option-name (acp-agent-model-options ag) id))
+           (unless baseline? (show-model! ag (or name id)))
+           (not name)]))))
+  ;; Worth one line each: an id the picker does not offer is the case where a
+  ;; header shows a raw model string, and the log is where the spelling the
+  ;; agent actually uses becomes visible.
+  (when unknown?
+    (log-once! ag (format "live-model ~a" id)
+               (format "the agent is running \"~a\", which its model picker does not offer" id))))
 
 ;; ---- which slash commands ----------------------------------------------------
 ;;
@@ -484,7 +558,22 @@
 (define (handle-notification! ag method params)
   (cond
     [(equal? method "session/update") (handle-update! ag params)]
+    [(equal? method sdk-message-method) (handle-sdk-message! ag params)]
     [else (log-kind-once! ag method)]))
+
+;; A CLI message the adapter forwarded verbatim because session/new asked for
+;; it. Only one kind was asked for, and only one field of it is read: `model`,
+;; the model this session is running right now. Everything else `init` carries
+;; — the tool list, the MCP servers, the permission mode, the slash commands,
+;; the CLI version — is deliberately unused; the bridge learns those from the
+;; protocol or not at all.
+(define (handle-sdk-message! ag params)
+  (define m (hash-ref params 'message (hash)))
+  (when (and (hash? m)
+             (equal? (hash-ref m 'type #f) "system")
+             (equal? (hash-ref m 'subtype #f) "init"))
+    (define id (string-or-false (hash-ref m 'model #f)))
+    (when id (learn-live-model! ag id))))
 
 ;; Update kinds this version consumes. Thoughts, plans and the rest of ACP's
 ;; running commentary are deliberately dropped — a chat panel that renders
@@ -513,7 +602,7 @@
                    (string-or-false (hash-ref u 'status #f)))]
     ;; the whole config set, resent: only the model is read out of it
     [(equal? kind "config_option_update")
-     (learn-model! ag (hash-ref u 'configOptions '()))]
+     (learn-config-model! ag (hash-ref u 'configOptions '()))]
     ;; the whole slash-command list, resent: what a panel completes with
     [(equal? kind "available_commands_update")
      (learn-commands! ag (hash-ref u 'availableCommands '()))]
@@ -530,16 +619,21 @@
      (if (string? t) t "")]
     [else ""]))
 
-;; Noise the bridge does not understand is worth exactly one line of log each.
-(define (log-kind-once! ag kind)
+;; A repeating condition is worth exactly one line of log: the agent says it
+;; every turn, and a log that repeats it every turn is a log nobody reads.
+(define (log-once! ag key message)
   (define new?
     (with-state ag
       (λ ()
         (cond
-          [(hash-ref (acp-agent-seen-kinds ag) kind #f) #f]
-          [else (set-acp-agent-seen-kinds! ag (hash-set (acp-agent-seen-kinds ag) kind #t))
+          [(hash-ref (acp-agent-seen-kinds ag) key #f) #f]
+          [else (set-acp-agent-seen-kinds! ag (hash-set (acp-agent-seen-kinds ag) key #t))
                 #t]))))
-  (when new? (log-line ag (format "ignoring ~a" kind))))
+  (when new? (log-line ag message)))
+
+;; Noise the bridge does not understand.
+(define (log-kind-once! ag kind)
+  (log-once! ag kind (format "ignoring ~a" kind)))
 
 ;; ---- turn bookkeeping ------------------------------------------------------
 
@@ -640,12 +734,13 @@
 (define (new-session! ag)
   (define r (request! ag "session/new"
                       (hash 'cwd (path->string (acp-agent-cwd ag))
-                            'mcpServers '())))
+                            'mcpServers '()
+                            '_meta session-meta)))
   (define sid (hash-ref r 'sessionId #f))
   (unless (string? sid) (user-fail "session/new returned no sessionId"))
   (with-state ag (λ () (set-acp-agent-session! ag sid)))
   ;; the session says what it runs; a bridge that asked would be guessing
-  (learn-model! ag (hash-ref r 'configOptions '()))
+  (learn-config-model! ag (hash-ref r 'configOptions '()))
   (with-handlers ([exn:fail?
                    (λ (e)
                      (log-line ag (format "set_mode ~a refused: ~a" bypass-mode (exn-message e)))
