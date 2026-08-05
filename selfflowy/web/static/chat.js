@@ -137,8 +137,14 @@
     try{open=localStorage.getItem(KEY)||'0'}catch(e){}
     setOpen(open==='1');
     // A turn was still running when the page was rendered: the panel comes
-    // up in the state the server says it is in, not idle.
-    if(panel.classList.contains('is-busy'))setBusy(true);
+    // up in the state the server says it is in, not idle. Adopt the
+    // replayed turn too, or the next live frame would start a duplicate.
+    if(panel.classList.contains('is-busy')){
+      setBusy(true);
+      var turns=body?body.querySelectorAll('.sf-chat-turn'):[];
+      turn=turns[turns.length-1]||null;
+      agentEl=turn?turn.querySelector('.sf-chat-msg.is-agent'):null;
+    }
     if(body)body.scrollTop=body.scrollHeight;
 
     document.addEventListener('click',function(e){
