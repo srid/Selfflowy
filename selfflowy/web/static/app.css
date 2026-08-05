@@ -549,6 +549,10 @@ button.sf-check:hover { color: var(--green); }
 
 .sf-chat-open:hover { color: var(--ink); border-color: var(--dim); }
 
+/* an open panel is on top of where the toggle sits — it would land on the
+   send button. It steps aside, and the header's × takes over. */
+.sf-chat-dock.is-open .sf-chat-open { display: none; }
+
 /* a turn is running behind a closed panel: the toggle breathes so working is
    visible without opening it. The ring is the accent color at low alpha,
    expanding and fading — no bounce, no color change on the button itself. */
@@ -596,6 +600,8 @@ body.sf-body:has(.sf-chat.is-open) .sf-main {
   letter-spacing: 0.04em;
   color: var(--dim);
 }
+
+.sf-chat-actions { display: flex; align-items: center; gap: 0.375rem; }
 
 .sf-chat-btn, .sf-chat-send, .sf-chat-stop {
   padding: 0.1875rem 0.5rem;

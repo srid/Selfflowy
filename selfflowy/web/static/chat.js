@@ -9,20 +9,25 @@
 // chunks accumulated.
 (function(){
   var KEY='selfflowy.chat';
-  var panel,body,form,input,sink,turn,agentEl;
+  var panel,dock,body,form,input,sink,turn,agentEl;
 
   // ---- open / closed (same shape as collapse.js: a class, remembered) ----
+  //
+  // The dock (the toggle's and the panel's shared parent) carries the class
+  // too: the toggle lives OUTSIDE the panel it opens, and an open panel is on
+  // top of where it sits, so app.css takes it away and the header's × becomes
+  // the way out.
   function setOpen(o){
     panel.classList.toggle('is-open',o);
+    if(dock)dock.classList.toggle('is-open',o);
     try{localStorage.setItem(KEY,o?'1':'0')}catch(e){}
   }
 
   function setBusy(b){
     panel.classList.toggle('is-busy',b);
     input.disabled=b;
-    // The toggle lives outside the panel it opens, so it needs its own cue:
-    // the dock (its shared parent) carries the class the button's CSS reads.
-    var dock=panel.closest('.sf-chat-dock');
+    // Same reason as above: a turn running behind a closed panel is a cue the
+    // toggle wears, and the toggle reads it off the dock.
     if(dock)dock.classList.toggle('is-busy',b);
   }
 
@@ -133,6 +138,7 @@
   function init(){
     panel=document.getElementById('sf-chat');
     if(!panel)return;
+    dock=panel.closest('.sf-chat-dock');
     body=document.getElementById('sf-chat-body');
     form=document.getElementById('sf-chat-form');
     input=form.querySelector('.sf-chat-input');
@@ -152,10 +158,17 @@
     if(body)body.scrollTop=body.scrollHeight;
 
     document.addEventListener('click',function(e){
-      var t=e.target.closest('[data-post],#sf-chat-toggle');
+      var t=e.target.closest('[data-post],[data-chat-toggle]');
       if(!t)return;
       e.preventDefault();
-      if(t.id==='sf-chat-toggle'){setOpen(!panel.classList.contains('is-open'));return}
+      // Two buttons, one path: the floating toggle and the header's ×.
+      if(t.hasAttribute('data-chat-toggle')){
+        var o=!panel.classList.contains('is-open');
+        setOpen(o);
+        // a panel that just opened has one thing to do, and it is type
+        if(o)input.focus();
+        return;
+      }
       post(t.getAttribute('data-post'));
     });
 

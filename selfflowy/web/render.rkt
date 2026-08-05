@@ -597,15 +597,24 @@
   (define busy?
     (for/or ([e (in-list transcript)]) (equal? (chat-string e 'status) "running")))
   `(div ((class "sf-chat-dock"))
-        (button ((type "button") (class "sf-chat-open") (id "sf-chat-toggle")
-                 (aria-label "toggle the agent panel"))
+        (button ((type "button") (class "sf-chat-open") (data-chat-toggle "")
+                 (aria-label "open the agent panel"))
                 ">_ agent")
         (aside ((class ,(classes "sf-chat" (and busy? "is-busy"))) (id "sf-chat"))
                (div ((class "sf-chat-head"))
                     (span ((class "sf-chat-title")) "agent · claude code")
-                    (button ((type "button") (class "sf-chat-btn")
-                             (data-post ,new-href) (title "new chat"))
-                            "+ new"))
+                    (div ((class "sf-chat-actions"))
+                         (button ((type "button") (class "sf-chat-btn")
+                                  (data-post ,new-href) (title "new chat"))
+                                 "+ new")
+                         ;; An open panel sits on top of the floating toggle,
+                         ;; so the way out is in here — and on a phone, where
+                         ;; the panel is a full-width sheet, it is the only one.
+                         (button ((type "button") (class "sf-chat-btn")
+                                  (data-chat-toggle "")
+                                  (title "close the agent panel")
+                                  (aria-label "close the agent panel"))
+                                 "×")))
                ;; Frames land here: the htmx sse extension would swap the raw
                ;; JSON in, and chat.js cancels that and keeps the data. One
                ;; connection, two consumers.

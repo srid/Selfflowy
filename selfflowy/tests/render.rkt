@@ -451,6 +451,9 @@
     ;; frames arrive on the page's own connection, under the name it is given
     (check-true (string-contains? s "sse-swap=\"chat\"") s)
     (check-false (string-contains? s "sse-connect") s)
+    ;; an open panel covers the floating toggle, so the header carries a way
+    ;; out of its own — two buttons, one toggle path
+    (check-equal? (length (regexp-match* #rx"data-chat-toggle" s)) 2 s)
     ;; idle: the input is live and there is nothing to stop
     (check-false (string-contains? s "is-busy") s)
     (check-false (string-contains? s "disabled") s))
