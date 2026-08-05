@@ -67,6 +67,7 @@
                  #:sidebar (or/c list? #f)
                  #:banner (or/c list? #f)
                  #:sse-connect (or/c string? #f)
+                 #:live-href (or/c string? #f)
                  #:head-extra list?
                  #:body-extra list?)
                 list?)]
@@ -458,11 +459,38 @@
               '())
         (span ((class "sf-error-detail")) ,detail)))
 
+;; What an `outline` event re-swaps: the banner slot AND the pane, in one
+;; container, because a save can change either and they must not be able to
+;; disagree about which snapshot they are showing.
+;;
+;; `live-href` is the page's OWN address, and it comes from the route layer —
+;; a renderer that guessed it would be guessing a URL, which is how the
+;; sidebar's Today link once came to 404. The container re-fetches that page
+;; and lifts itself back out of the reply (hx-select), so one handler serves
+;; both the first load and every swap.
+(define (live-region live-href banner main)
+  (define slot
+    ;; fixed slot: the banner is swapped in and out, so it must exist
+    ;; (empty) even on a healthy page
+    `(div ((class "sf-banner-slot") (id "sf-banner"))
+          ,@(if banner (list banner) '())))
+  (if live-href
+      `(div ((id "sf-live")
+             (hx-get ,live-href)
+             (hx-trigger "sse:outline")
+             (hx-select "#sf-live")
+             (hx-target "#sf-live")
+             (hx-swap "outerHTML"))
+            ,slot
+            ,main)
+      `(div ((id "sf-live")) ,slot ,main)))
+
 (define (render-page main
                      #:title [title "selfflowy"]
                      #:sidebar [sidebar #f]
                      #:banner [banner #f]
                      #:sse-connect [sse-connect #f]
+                     #:live-href [live-href #f]
                      #:head-extra [head-extra '()]
                      #:body-extra [body-extra '()])
   `(html ((lang "en"))
@@ -483,11 +511,7 @@
                       '()))
                ,@(if sidebar (list sidebar) '())
                (main ((class "sf-main"))
-                     ;; fixed slot: the banner is swapped in and out, so it
-                     ;; must exist (empty) even on a healthy page
-                     (div ((class "sf-banner-slot") (id "sf-banner"))
-                          ,@(if banner (list banner) '()))
-                     ,main)
+                     ,(live-region live-href banner main))
                ,@body-extra)))
 
 ;; Serve this, not a bare xexpr: without the doctype browsers fall into

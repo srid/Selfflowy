@@ -4,6 +4,7 @@
 ;;
 ;;   GET /              the html page: sidebar + outline
 ;;   GET /today         today's Daily day node, zoomed
+;;   GET /events        SSE stream; `outline` (data: store revision) per reload
 ;;   GET /api/tree      byte-identical to `selfflowy tree`
 ;;   GET /api/agenda    byte-identical to `selfflowy agenda --json`
 ;;   GET /static/*      files from web/static/
@@ -13,6 +14,10 @@
 ;; Routing, static files, and MIME types come from racket web-server. Outline
 ;; content comes from selfflowy/store — this module owns routes and responses,
 ;; never a load.
+;;
+;; Live updates are three parts that only meet here: the store knows WHAT the
+;; outlines are, the watcher knows WHEN they moved, the hub knows WHO is
+;; listening. None of them knows about the other two.
 
 (require racket/async-channel
          racket/path
@@ -37,7 +42,9 @@
          selfflowy/load
          (only-in selfflowy/paths file-label)
          selfflowy/store
-         selfflowy/web/render)
+         selfflowy/web/events
+         selfflowy/web/render
+         selfflowy/web/watch)
 
 (provide start-server)
 
@@ -101,12 +108,17 @@
 (define (error-banner err)
   (render-error-banner (load-error-detail err) #:where (load-error-where err)))
 
-(define (page-failure err)
+;; Nothing to show at all — the FIRST load failed. Still an SSE page: the
+;; next save is what fixes it, and the client should not have to reload to
+;; find that out.
+(define (page-failure err #:live-href live-href)
   (html-response
    (page->html-string
     (render-page (render-empty-pane "No outline loaded." #:home-href home-href)
                  #:title "selfflowy"
-                 #:banner (error-banner err)))
+                 #:banner (error-banner err)
+                 #:sse-connect events-href
+                 #:live-href live-href))
    #:code 500))
 
 ;; ---- the route table ------------------------------------------------------
@@ -117,6 +129,11 @@
 
 (define home-href "/")
 (define today-href "/today")
+
+;; The push channel. A page re-fetches ITSELF on an `outline` event, so the
+;; href it re-fetches is whichever of the two above rendered it — handed to
+;; the renderer, never guessed by it.
+(define events-href "/events")
 
 ;; A node's address. There is no zoom route yet, so it is the home page
 ;; anchored at the node — every node carries id="n-<key>" there.
@@ -129,7 +146,11 @@
       (file-label (car files))
       "selfflowy"))
 
-(define (chrome files-data main #:title title #:banner [banner #f] #:code [code 200])
+(define (chrome files-data main
+                #:title title
+                #:live-href live-href
+                #:banner [banner #f]
+                #:code [code 200])
   (html-response
    (page->html-string
     (render-page main
@@ -138,22 +159,25 @@
                                            #:home-href home-href
                                            #:today-href today-href
                                            #:zoom-base node-href-base)
-                 #:banner banner))
+                 #:banner banner
+                 #:sse-connect events-href
+                 #:live-href live-href))
    #:code code))
 
 (define (page-handler st)
-  (with-snapshot st page-failure #:stale-ok? #t
+  (with-snapshot st (λ (err) (page-failure err #:live-href home-href)) #:stale-ok? #t
     (λ (snap err)
       (define files-data (snapshot-files-data snap))
       (chrome files-data
               (render-outline files-data #:today (today-iso-string))
               #:title (page-title (store-files st))
+              #:live-href home-href
               #:banner (and err (error-banner err))))))
 
 ;; Today's Daily day node, zoomed. No day node yet is the normal state before
 ;; the first capture of the day, not an error.
 (define (today-handler st)
-  (with-snapshot st page-failure #:stale-ok? #t
+  (with-snapshot st (λ (err) (page-failure err #:live-href today-href)) #:stale-ok? #t
     (λ (snap err)
       (define today (today-iso-string))
       (define key (snapshot-day-key snap today))
@@ -167,6 +191,7 @@
                    (format "No day node for ~a. Run: selfflowy daily" today)
                    #:home-href home-href))
               #:title (string-append "today " today)
+              #:live-href today-href
               #:banner (and err (error-banner err))))))
 
 (define (tree-handler st)
@@ -186,11 +211,13 @@
 
 ;; ---- dispatch -------------------------------------------------------------
 
-(define (make-router st)
+(define (make-router st hub)
   (define-values (route _url)
     (dispatch-rules
      [("") (λ (req) (page-handler st))]
      [("today") (λ (req) (today-handler st))]
+     ;; mounted, not understood: what an event MEANS lives in web/events
+     [("events") (λ (req) (hub-response hub))]
      [("api" "tree") (λ (req) (tree-handler st))]
      [("api" "agenda") (λ (req) (agenda-handler st))]
      [else (λ (req) (not-found-response))]))
@@ -206,13 +233,13 @@
       (with-handlers ([exn:fail? (λ (_e) (next-dispatcher))])
         (u->p (struct-copy url u [path rest]))))))
 
-(define (make-dispatcher st)
+(define (make-dispatcher st hub)
   (sequencer:make
    (filter:make (regexp (string-append "^" (regexp-quote web-static-prefix)))
                 (files:make #:url->path static-url->path
                             #:path->mime-type (make-path->mime-type mime-types-path)
                             #:indices '()))
-   (lift:make (make-router st))))
+   (lift:make (make-router st hub))))
 
 ;; ---- server ---------------------------------------------------------------
 
@@ -223,9 +250,10 @@
                       #:files files
                       #:on-listen [on-listen void])
   (define st (make-store files))
+  (define hub (make-hub))
   (define confirm (make-async-channel 1))
   (define stop
-    (serve #:dispatch (make-dispatcher st)
+    (serve #:dispatch (make-dispatcher st hub)
            #:port port
            #:listen-ip bind
            #:confirmation-channel confirm))
@@ -233,5 +261,18 @@
   (when (exn? bound)
     (stop)
     (raise bound))
+  ;; Only once there is a listener: a watcher with nobody to tell is a
+  ;; thread that reloads outlines for its own amusement.
+  ;;
+  ;; The payload is the store revision — the browser only needs "re-fetch",
+  ;; but a revision makes the stream readable by hand (curl) and gives a
+  ;; client something to compare.
+  (define stop-watcher
+    (start-watcher st
+                   #:on-change
+                   (λ () (hub-broadcast! hub "outline"
+                                         (number->string (store-revision st))))))
   (on-listen bound)
-  stop)
+  (λ ()
+    (stop-watcher)
+    (stop)))
