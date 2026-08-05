@@ -5,9 +5,19 @@
 ;;
 ;; It speaks just enough of the protocol to be indistinguishable from a real
 ;; agent as far as selfflowy/web/acp is concerned: line-delimited JSON-RPC on
-;; stdio, initialize / session/new / session/set_mode, one turn per
-;; session/prompt, session/cancel as a notification, and session/update
-;; notifications on the way.
+;; stdio, initialize / session/new / session/load / session/list /
+;; session/set_mode, one turn per session/prompt, session/cancel as a
+;; notification, and session/update notifications on the way.
+;;
+;; STORED SESSIONS are an environment variable, because which boot path runs is
+;; a property of the machine the agent woke up on, not of anything a client
+;; says:
+;;
+;;   SELFFLOWY_FAKE_ACP_STORED   non-empty -> session/list answers with two
+;;                               conversations and session/load replays the
+;;                               one that is asked for; unset (the default) ->
+;;                               nothing is stored, so a client boots the way
+;;                               it always did, with session/new
 ;;
 ;; Behaviour is keyed on the prompt text, so a test asks for what it needs:
 ;;
@@ -60,7 +70,26 @@
 
 ;; ---- state -----------------------------------------------------------------
 
-(define session-id "fake-session-1")
+;; Which session this process is in. A load moves it: the updates a replay
+;; sends carry the loaded id, the way a real one's do.
+(define session-id (box "fake-session-1"))
+
+;; What this machine has stored, newest LAST on purpose — a client that takes
+;; the first entry instead of the most recently updated one gets the wrong
+;; conversation, and a test says so.
+(define stored-sessions
+  (list (hash 'sessionId "fake-stored-old"
+              'cwd "/tmp"
+              'title "an older conversation"
+              'updatedAt "2026-07-01T09:00:00.000Z")
+        (hash 'sessionId "fake-stored-new"
+              'cwd "/tmp"
+              'title "the last conversation"
+              'updatedAt "2026-08-01T17:30:00.000Z")))
+
+(define (stored?)
+  (define v (getenv "SELFFLOWY_FAKE_ACP_STORED"))
+  (and v (not (string=? v ""))))
 
 ;; Set by a session/cancel notification, cleared when a prompt is accepted —
 ;; both in the reading loop, so the two stay in the order they arrived.
@@ -113,10 +142,10 @@
 (define (init!)
   (when (raw-init-wanted?)
     (notify! "_claude/sdkMessage"
-             (hash 'sessionId session-id
+             (hash 'sessionId (unbox session-id)
                    'message (hash 'type "system"
                                   'subtype "init"
-                                  'session_id session-id
+                                  'session_id (unbox session-id)
                                   'model (unbox live-model)
                                   'permissionMode "bypassPermissions"
                                   'slash_commands (list "model"))))))
@@ -145,7 +174,7 @@
 ;; ---- the turn --------------------------------------------------------------
 
 (define (update! u)
-  (notify! "session/update" (hash 'sessionId session-id 'update u)))
+  (notify! "session/update" (hash 'sessionId (unbox session-id) 'update u)))
 
 (define (chunk! text)
   (update! (hash 'sessionUpdate "agent_message_chunk"
@@ -154,6 +183,41 @@
 (define (commands!)
   (update! (hash 'sessionUpdate "available_commands_update"
                  'availableCommands (unbox commands))))
+
+;; The conversation's own name — a stored one keeps the name it was listed
+;; under. The real adapter pulls this from the session file at turn end and
+;; pushes it when it moved; this one says it once, as soon as there is a
+;; session to say it about, so the frame it becomes is where a test can find it.
+(define (session-info!)
+  (define stored
+    (for/or ([s (in-list stored-sessions)])
+      (and (equal? (hash-ref s 'sessionId) (unbox session-id))
+           (hash-ref s 'title))))
+  (update! (hash 'sessionUpdate "session_info_update"
+                 'title (or stored "a fake conversation")
+                 'updatedAt "2026-08-05T12:00:00.000Z")))
+
+;; ---- replaying a stored session ---------------------------------------------
+;;
+;; What `session/load` does before it answers: every message of the
+;; conversation, in order, as ordinary session/update notifications. One turn
+;; here — a prompt, an answer, a tool call — which is the shape a client has to
+;; reassemble with no live turn to hang it on.
+(define (replay!)
+  (update! (hash 'sessionUpdate "user_message_chunk"
+                 'content (hash 'type "text" 'text "what did we do")))
+  (update! (hash 'sessionUpdate "agent_message_chunk"
+                 'content (hash 'type "text" 'text "we ")))
+  (update! (hash 'sessionUpdate "agent_message_chunk"
+                 'content (hash 'type "text" 'text "shipped it")))
+  (update! (hash 'sessionUpdate "tool_call"
+                 'toolCallId "call-replay"
+                 'title "read Roadmap.rkt"
+                 'kind "read"
+                 'status "pending"))
+  (update! (hash 'sessionUpdate "tool_call_update"
+                 'toolCallId "call-replay"
+                 'status "completed")))
 
 ;; Sleep in slices so a cancel lands promptly. -> #t if it ran to the end.
 (define (dawdle seconds)
@@ -166,7 +230,7 @@
 (define (ask-permission!)
   (define id (take-id!))
   (emit! (hash 'jsonrpc "2.0" 'id id 'method "session/request_permission"
-               'params (hash 'sessionId session-id
+               'params (hash 'sessionId (unbox session-id)
                              'toolCall (hash 'toolCallId "call-1" 'title "read Tasks.rkt")
                              'options (list (hash 'optionId "reject"
                                                   'name "Reject"
@@ -238,6 +302,13 @@
      (hash-ref b 'text ""))
    ""))
 
+;; Whether this client wants the CLI's raw messages, off a session/new or
+;; session/load `_meta`.
+(define (remember-raw-filter! params)
+  (define meta (hash-ref params '_meta (hash)))
+  (define claude (if (hash? meta) (hash-ref meta 'claudeCode (hash)) (hash)))
+  (set-box! raw-filter (if (hash? claude) (hash-ref claude 'emitRawSDKMessages #f) #f)))
+
 (define (handle! js)
   (define method (hash-ref js 'method #f))
   (define id (hash-ref js 'id #f))
@@ -246,14 +317,34 @@
     ;; the client answering session/request_permission
     [(and id (not method)) (channel-put permission-ch js)]
     [(equal? method "initialize")
+     ;; A machine with nothing stored says so the honest way: it keeps
+     ;; sessions, there are just none of them. Same code path either way.
      (respond! id (hash 'protocolVersion 1
-                        'agentCapabilities (hash 'loadSession #f)
+                        'agentCapabilities (hash 'loadSession #t
+                                                 'sessionCapabilities (hash 'list (hash)))
                         'agentInfo (hash 'name "fake-acp-agent" 'version "1")))]
+    [(equal? method "session/list")
+     (respond! id (hash 'sessions (if (stored?) stored-sessions '())))]
     [(equal? method "session/new")
-     (define meta (hash-ref params '_meta (hash)))
-     (define claude (if (hash? meta) (hash-ref meta 'claudeCode (hash)) (hash)))
-     (set-box! raw-filter (if (hash? claude) (hash-ref claude 'emitRawSDKMessages #f) #f))
-     (respond! id (hash 'sessionId session-id 'configOptions (config-options)))]
+     (remember-raw-filter! params)
+     (respond! id (hash 'sessionId (unbox session-id) 'configOptions (config-options)))]
+    ;; The whole conversation, replayed as notifications, and only THEN the
+    ;; answer — which is the ordering the assembler on the other side is built
+    ;; around. `_meta` is honored here exactly as on session/new: a loaded
+    ;; session that asked for raw CLI messages gets them too.
+    [(equal? method "session/load")
+     (define sid (hash-ref params 'sessionId #f))
+     (cond
+       [(and (stored?) (for/or ([s (in-list stored-sessions)])
+                         (equal? (hash-ref s 'sessionId) sid)))
+        (remember-raw-filter! params)
+        (set-box! session-id sid)
+        (replay!)
+        (respond! id (hash 'configOptions (config-options)))]
+       [else
+        (emit! (hash 'jsonrpc "2.0" 'id id
+                     'error (hash 'code -32602
+                                  'message (format "no such session: ~a" sid))))])]
     [(equal? method "session/set_mode")
      (respond! id (hash))
      ;; The commands go out once the session exists — the adapter sends them
@@ -261,7 +352,9 @@
      ;; here. Pinned to set_mode so the order a test sees is the same every
      ;; run: the model (read off the session/new result) first, then these,
      ;; and both before the first prompt can be answered.
-     (commands!)]
+     (commands!)
+     ;; and the conversation's name, which the agent is the one that knows
+     (session-info!)]
     [(equal? method "session/cancel") (set-box! cancelled? #t)]
     [(equal? method "session/prompt")
      (define text (prompt-text params))

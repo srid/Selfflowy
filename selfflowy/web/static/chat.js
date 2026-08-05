@@ -9,7 +9,7 @@
 // chunks accumulated.
 (function(){
   var KEY='selfflowy.chat';
-  var panel,dock,body,form,input,sink,turn,agentEl,modelEl,pop;
+  var panel,dock,body,form,input,sink,turn,agentEl,modelEl,sessionEl,pop,spop;
 
   // ---- open / closed (same shape as collapse.js: a class, remembered) ----
   //
@@ -174,6 +174,80 @@
     input.focus();
   }
 
+  // ---- past conversations ------------------------------------------------
+  //
+  // The agent keeps its conversations, keyed by the directory it works in, and
+  // the server comes up in the last one. This is how you get to the others:
+  // the list is fetched from the route every time the popover opens (the
+  // agent's list is the only one that is right), and picking a row POSTs an
+  // id. What the panel then shows arrives as frames — a reset, the replayed
+  // turns, the session — the same way everything else here does.
+  var sessions=[],sessPicked=-1,sessionsUrl=null,loadUrl=null;
+
+  function spopOpen(){return !!spop&&!spop.hidden}
+
+  function closeSpop(){
+    if(spop){spop.hidden=true;spop.textContent=''}
+    sessions=[];sessPicked=-1;
+  }
+
+  // ISO 8601 is what the agent says; a chat header wants "2026-08-05 14:41".
+  function stamp(s){
+    return typeof s==='string'?s.slice(0,16).replace('T',' '):'';
+  }
+
+  function drawSpop(list){
+    if(!spop)return;
+    spop.textContent='';
+    if(!list.length){
+      spop.appendChild(line('sf-chat-cmd-desc','no past chats here'));
+      sessions=[];sessPicked=-1;spop.hidden=false;
+      return;
+    }
+    for(var i=0;i<list.length;i++){
+      var row=line('sf-chat-cmd');
+      row.setAttribute('data-index',String(i));
+      if(list[i].current)row.setAttribute('data-current','1');
+      row.appendChild(line('sf-chat-cmd-name',list[i].title||'(untitled)'));
+      row.appendChild(line('sf-chat-cmd-desc',stamp(list[i].updatedAt)));
+      spop.appendChild(row);
+    }
+    sessions=list;
+    spop.hidden=false;
+    highlightSess(0);
+  }
+
+  function highlightSess(i){
+    var rows=spop.querySelectorAll('.sf-chat-cmd');
+    if(!rows.length)return;
+    sessPicked=(i+rows.length)%rows.length;
+    for(var j=0;j<rows.length;j++)rows[j].classList.toggle('is-picked',j===sessPicked);
+    if(rows[sessPicked].scrollIntoView)rows[sessPicked].scrollIntoView({block:'nearest'});
+  }
+
+  function openSpop(){
+    if(!sessionsUrl)return;
+    closePop();
+    fetch(sessionsUrl).then(function(r){
+      if(!r.ok)return r.text().then(function(t){
+        append(line('sf-chat-msg is-error',(t||'').trim()||('http '+r.status)));
+      });
+      return r.json().then(function(j){
+        drawSpop((j&&j.sessions)||[]);
+      });
+    }).catch(function(e){
+      append(line('sf-chat-msg is-error',String(e)));
+    });
+  }
+
+  // Loading the one you are already in would replay it at you for nothing.
+  function loadSession(i){
+    var s=sessions[i];
+    closeSpop();
+    if(!s||!loadUrl||s.current)return;
+    post(loadUrl,{id:s.id});
+  }
+
   function frame(f){
     if(f.type==='user'){startTurn(f.text)}
     else if(f.type==='chunk'){
@@ -211,6 +285,11 @@
       setCommands(f.commands);
       if(popOpen())redraw();
     }
+    // which conversation this is. The title turns up a turn or so in (the
+    // agent writes it), so an empty one is normal and takes the line away.
+    else if(f.type==='session'){
+      if(sessionEl)sessionEl.textContent=typeof f.title==='string'?f.title:'';
+    }
   }
 
   function endTurn(){turn=null;agentEl=null;setBusy(false)}
@@ -220,11 +299,13 @@
   // The reply is a status, not content: what the panel draws comes back over
   // SSE, which is what keeps a second tab in step. A refusal (409 busy, 503
   // no agent) is the one thing worth saying here, and it says it inline.
-  function post(url,text){
+  function post(url,fields){
     var opts={method:'POST'};
-    if(text!==undefined){
+    if(fields){
+      var parts=[];
+      for(var k in fields)parts.push(k+'='+encodeURIComponent(fields[k]));
       opts.headers={'Content-Type':'application/x-www-form-urlencoded'};
-      opts.body='text='+encodeURIComponent(text);
+      opts.body=parts.join('&');
     }
     fetch(url,opts).then(function(r){
       if(r.ok)return;
@@ -247,6 +328,7 @@
     input=form.querySelector('.sf-chat-input');
     sink=document.getElementById('sf-chat-sink');
     modelEl=document.getElementById('sf-chat-model');
+    sessionEl=document.getElementById('sf-chat-session');
     // What the server knew when it drew the page. Bad JSON is no commands,
     // not a broken panel.
     try{setCommands(JSON.parse(panel.getAttribute('data-commands')||'[]'))}catch(e){}
@@ -256,6 +338,18 @@
     pop.id='sf-chat-pop';
     pop.hidden=true;
     form.appendChild(pop);
+    // The sessions popover hangs off the HEADER, where its button is: same
+    // surface, the other end of the panel.
+    var head=panel.querySelector('.sf-chat-head');
+    var sbtn=panel.querySelector('[data-chat-sessions]');
+    if(head&&sbtn){
+      sessionsUrl=sbtn.getAttribute('data-chat-sessions');
+      loadUrl=sbtn.getAttribute('data-chat-load');
+      spop=line('sf-chat-pop sf-chat-spop');
+      spop.id='sf-chat-spop';
+      spop.hidden=true;
+      head.appendChild(spop);
+    }
     var open='0';
     try{open=localStorage.getItem(KEY)||'0'}catch(e){}
     setOpen(open==='1');
@@ -271,12 +365,20 @@
     if(body)body.scrollTop=body.scrollHeight;
 
     document.addEventListener('click',function(e){
-      var t=e.target.closest('[data-post],[data-chat-toggle],[data-chat-commands]');
+      var t=e.target.closest('[data-post],[data-chat-toggle],[data-chat-commands],[data-chat-sessions]');
       // a click anywhere but the popover's own surface (or the input it
       // completes) puts it away
       if(!t&&!(pop&&pop.contains(e.target))&&e.target!==input)closePop();
+      if(!t&&!(spop&&spop.contains(e.target)))closeSpop();
       if(!t)return;
       e.preventDefault();
+      // The past conversations, fetched fresh. Pressing it again puts them
+      // away, same as the commands button.
+      if(t.hasAttribute('data-chat-sessions')){
+        if(spopOpen())closeSpop();
+        else openSpop();
+        return;
+      }
       // Two buttons, one path: the floating toggle and the header's ×.
       if(t.hasAttribute('data-chat-toggle')){
         var o=!panel.classList.contains('is-open');
@@ -301,7 +403,7 @@
       if(!text)return;
       input.value='';
       closePop();
-      post(form.getAttribute('action'),text);
+      post(form.getAttribute('action'),{text:text});
     });
 
     input.addEventListener('input',refresh);
@@ -324,6 +426,24 @@
       e.preventDefault();
       accept(Number(row.getAttribute('data-index')));
     });
+
+    // The sessions popover has no input to own its keys, so it borrows the
+    // document's while it is open: arrows move, Enter loads, Esc puts it away.
+    if(spop){
+      spop.addEventListener('mousedown',function(e){
+        var row=e.target.closest('.sf-chat-cmd');
+        if(!row)return;
+        e.preventDefault();
+        loadSession(Number(row.getAttribute('data-index')));
+      });
+      document.addEventListener('keydown',function(e){
+        if(!spopOpen())return;
+        if(e.key==='Escape'){e.preventDefault();closeSpop()}
+        else if(e.key==='ArrowDown'){e.preventDefault();highlightSess(sessPicked+1)}
+        else if(e.key==='ArrowUp'){e.preventDefault();highlightSess(sessPicked-1)}
+        else if(e.key==='Enter'){e.preventDefault();loadSession(sessPicked)}
+      });
+    }
 
     // The htmx sse extension would swap the frame's JSON into #sf-chat-sink.
     // Cancelling that message is how this panel borrows the page's one

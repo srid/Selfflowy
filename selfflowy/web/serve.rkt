@@ -9,6 +9,8 @@
 ;;   POST /chat         prompt the agent (form field `text`) -> 204
 ;;   POST /chat/new     new chat -> 204
 ;;   POST /chat/cancel  cancel the turn in flight -> 204
+;;   GET  /chat/sessions the agent's stored conversations, as JSON
+;;   POST /chat/load    load one of them (form field `id`) -> 204
 ;;   GET  /api/tree     byte-identical to `selfflowy tree`
 ;;   GET  /api/agenda   byte-identical to `selfflowy agenda --json`
 ;;   GET  /static/*     files from web/static/
@@ -157,11 +159,14 @@
 ;; anchored at the node — every node carries id="n-<key>" there.
 (define node-href-base "/#n-")
 
-;; The chat panel's three verbs. All POST, all 204: the reply the panel
-;; renders comes back over `events-href`.
+;; The chat panel's verbs. All POST, all 204: the reply the panel renders comes
+;; back over `events-href`. The one GET is the picker's list, which is a thing
+;; to draw rather than a thing that happened, so it answers with content.
 (define chat-href "/chat")
 (define chat-new-href "/chat/new")
 (define chat-cancel-href "/chat/cancel")
+(define chat-sessions-href "/chat/sessions")
+(define chat-load-href "/chat/load")
 
 ;; ---- handlers: the chat panel ---------------------------------------------
 
@@ -175,8 +180,11 @@
                           #:send-href chat-href
                           #:new-href chat-new-href
                           #:cancel-href chat-cancel-href
+                          #:sessions-href chat-sessions-href
+                          #:load-href chat-load-href
                           #:event acp-event-name
                           #:model (agent-model agent)
+                          #:session-title (agent-session-title agent)
                           #:commands (agent-commands agent))))
 
 ;; The bridge's failure kinds, as statuses: 'busy is a second prompt while a
@@ -221,6 +229,26 @@
   (if agent
       (with-agent-op (λ () (agent-cancel! agent) (no-content-response)))
       (no-agent-response)))
+
+;; The picker's two routes. The list is asked of the AGENT on every request —
+;; it is the only thing that knows what it has stored, and a cached copy would
+;; be wrong the moment another client wrote a session.
+(define (chat-sessions-handler agent)
+  (if agent
+      (with-agent-op
+       (λ () (json-response (hash 'sessions (agent-sessions agent)))))
+      (no-agent-response)))
+
+;; Picking one says nothing either: the reset, the replayed turns and the
+;; session frame all arrive on the stream, so every open tab repopulates.
+(define (chat-load-handler agent req)
+  (cond
+    [(not agent) (no-agent-response)]
+    [else
+     (define id (form-field req #"id"))
+     (if id
+         (with-agent-op (λ () (agent-load! agent id) (no-content-response)))
+         (text-response "chat: a session id is required\n" #:code 400))]))
 
 ;; ---- handlers: pages and JSON ---------------------------------------------
 
@@ -317,6 +345,8 @@
      [("chat") #:method "post" (λ (req) (chat-handler agent req))]
      [("chat" "new") #:method "post" (λ (req) (chat-new-handler agent))]
      [("chat" "cancel") #:method "post" (λ (req) (chat-cancel-handler agent))]
+     [("chat" "sessions") (λ (req) (chat-sessions-handler agent))]
+     [("chat" "load") #:method "post" (λ (req) (chat-load-handler agent req))]
      [("api" "tree") (λ (req) (tree-handler st))]
      [("api" "agenda") (λ (req) (agenda-handler st))]
      [else (λ (req) (not-found-response))]))
@@ -392,6 +422,10 @@
                    (λ () (hub-broadcast! hub "outline"
                                          (number->string (store-revision st))))))
   (when agent (on-agent agent))
+  ;; And only once there is a listener here too: the bridge boots in its own
+  ;; thread, so pages serve while the agent starts and the last conversation
+  ;; replays into them. A failure is a frame, not a server that did not come up.
+  (when agent (agent-boot! agent))
   (on-listen bound)
   (λ ()
     (stop-watcher)

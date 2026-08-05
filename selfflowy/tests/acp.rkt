@@ -64,6 +64,25 @@
 (define (frame-types fs)
   (for/list ([f (in-list fs)]) (hash-ref (cdr f) 'type #f)))
 
+;; The frames of one type, in order — an assertion about WHAT a frame said
+;; rather than about where in the sequence it landed (the sequence has its own
+;; check, right above every one of these).
+(define (frames-of fs type)
+  (for/list ([f (in-list fs)]
+             #:when (equal? (hash-ref (cdr f) 'type #f) type))
+    (cdr f)))
+
+(define (frame-of fs type)
+  (define hits (frames-of fs type))
+  (and (pair? hits) (car hits)))
+
+;; What a session says about itself the moment it exists: which conversation
+;; (twice — the id as soon as there is one, the name when the agent has written
+;; one), which model it runs, which slash commands it offers. A bridge that
+;; boots lazily says all of it inside the first turn, which is the turn that
+;; booted it.
+(define boot-frames '("session" "model" "commands" "session"))
+
 ;; A command list as pairs, and its key count beside it. A frame's hashes come
 ;; back from read-json and the bridge's are its own, so the comparison is over
 ;; content — and the count is how "and nothing else" is said.
@@ -85,6 +104,11 @@
   (string-append "#lang selfflowy\n" "Inbox\n" "  Buy milk\n"))
 
 ;; Boots the real server with the fake agent wired in: (proc port agent).
+;;
+;; The server boots the agent itself now, in the background, so the body runs
+;; only once that has finished: everything the boot says (the session, the
+;; model, the commands) is already out, and what a test then asserts on the
+;; stream is the turn it asked for.
 (define (with-server proc)
   (define dir (make-temporary-file "sfacp~a" 'directory))
   (define f (build-path dir "Tasks.rkt"))
@@ -100,10 +124,31 @@
                   #:on-agent (λ (a) (set! agent a))))
   (dynamic-wind
    void
-   (λ () (proc bound agent))
+   (λ ()
+     (check-true (wait-booted agent) "the agent never booted")
+     (proc bound agent))
    (λ ()
      (stop)
      (delete-directory/files dir))))
+
+;; -> #t once the bridge has a session.
+(define (wait-booted ag [seconds 30])
+  (define deadline (+ (current-inexact-milliseconds) (* 1000.0 seconds)))
+  (let loop ()
+    (cond
+      [(agent-session-id ag) #t]
+      [(>= (current-inexact-milliseconds) deadline) #f]
+      [else (sleep 0.02) (loop)])))
+
+;; The fake agent keeps stored sessions only when it is told to (see its
+;; header): the environment is what the subprocess inherits, so this is set
+;; around the whole of a test, agent and all.
+(define (with-stored-sessions thunk)
+  (define env (current-environment-variables))
+  (dynamic-wind
+   (λ () (environment-variables-set! env #"SELFFLOWY_FAKE_ACP_STORED" #"1"))
+   thunk
+   (λ () (environment-variables-set! env #"SELFFLOWY_FAKE_ACP_STORED" #f))))
 
 ;; /events never ends, so this keeps the port. Same shape as tests/serve.rkt.
 (define (open-events port)
@@ -218,23 +263,24 @@
        (agent-prompt! ag "hello there")
        (define fs (frames-through frames "done"))
        (check-equal? (map car fs) (make-list (length fs) "chat"))
-       ;; the `model` and `commands` frames are the session announcing itself:
-       ;; the subprocess is spawned by this first prompt, so they land inside
-       ;; this first turn
+       ;; the boot frames are the session announcing itself: the subprocess is
+       ;; spawned by this first prompt, so they land inside this first turn
        (check-equal? (frame-types fs)
-                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
-       (define js (map cdr fs))
-       (check-equal? (hash-ref (list-ref js 0) 'text) "hello there")
-       (check-equal? (hash-ref (list-ref js 1) 'name) "fake-model-1")
-       (check-equal? (hash-ref (list-ref js 3) 'text) "hello ")
-       (check-equal? (hash-ref (list-ref js 4) 'text) "world")
+                     (append '("user") boot-frames
+                             '("chunk" "chunk" "tool" "tool" "done")))
+       (check-equal? (hash-ref (frame-of fs "user") 'text) "hello there")
+       (check-equal? (hash-ref (frame-of fs "model") 'name) "fake-model-1")
+       (check-equal? (for/list ([f (in-list (frames-of fs "chunk"))])
+                       (hash-ref f 'text))
+                     '("hello " "world"))
        ;; one line, two frames: the same id, the status moving
-       (check-equal? (hash-ref (list-ref js 5) 'id) "call-1")
-       (check-equal? (hash-ref (list-ref js 5) 'title) "read Tasks.rkt")
-       (check-equal? (hash-ref (list-ref js 5) 'status) "pending")
-       (check-equal? (hash-ref (list-ref js 6) 'id) "call-1")
-       (check-equal? (hash-ref (list-ref js 6) 'status) "completed")
-       (check-equal? (hash-ref (list-ref js 7) 'stopReason) "end_turn")
+       (define tools (frames-of fs "tool"))
+       (check-equal? (hash-ref (list-ref tools 0) 'id) "call-1")
+       (check-equal? (hash-ref (list-ref tools 0) 'title) "read Tasks.rkt")
+       (check-equal? (hash-ref (list-ref tools 0) 'status) "pending")
+       (check-equal? (hash-ref (list-ref tools 1) 'id) "call-1")
+       (check-equal? (hash-ref (list-ref tools 1) 'status) "completed")
+       (check-equal? (hash-ref (frame-of fs "done") 'stopReason) "end_turn")
        ;; and the transcript is that turn, accumulated
        (check-true (wait-idle ag))
        (define t (agent-transcript ag))
@@ -258,7 +304,8 @@
        (agent-prompt! ag "read a file PERMISSION please")
        (define fs (frames-through frames "done"))
        (check-equal? (frame-types fs)
-                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
+                     (append '("user") boot-frames
+                             '("chunk" "chunk" "tool" "tool" "done")))
        (check-equal? (hash-ref (cdr (last fs)) 'stopReason) "end_turn"))))
 
   ;; ---- which model ---------------------------------------------------------
@@ -275,8 +322,9 @@
        (agent-prompt! ag "hello there")
        (define fs (frames-through frames "done"))
        (check-equal? (frame-types fs)
-                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
-       (check-equal? (hash-ref (cdr (list-ref fs 1)) 'name) "fake-model-1")
+                     (append '("user") boot-frames
+                             '("chunk" "chunk" "tool" "tool" "done")))
+       (check-equal? (hash-ref (frame-of fs "model") 'name) "fake-model-1")
        (check-true (wait-idle ag))
        (check-equal? (agent-model ag) "fake-model-1")
        ;; a session that changes model mid-turn says so, in place
@@ -305,7 +353,8 @@
        ;; the first init agrees with the config option, so it is a baseline and
        ;; says nothing: one `model` frame for the session, not two
        (check-equal? (frame-types fs)
-                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
+                     (append '("user") boot-frames
+                             '("chunk" "chunk" "tool" "tool" "done")))
        (check-true (wait-idle ag))
        (check-equal? (agent-model ag) "fake-model-1")
        ;; the slash command: a fresh init, no config_option_update
@@ -361,12 +410,13 @@
        (agent-prompt! ag "hello there")
        (define fs (frames-through frames "done"))
        (check-equal? (frame-types fs)
-                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
+                     (append '("user") boot-frames
+                             '("chunk" "chunk" "tool" "tool" "done")))
        ;; name and description, and nothing else: the argument hint the
        ;; adapter sends is not something the panel draws
        (define offered '(("fake-init" "start something" 2)
                          ("fake-review" "look it over" 2)))
-       (check-equal? (command-pairs (hash-ref (cdr (list-ref fs 2)) 'commands)) offered)
+       (check-equal? (command-pairs (hash-ref (frame-of fs "commands") 'commands)) offered)
        (check-true (wait-idle ag))
        (check-equal? (command-pairs (agent-commands ag)) offered)
        ;; a session that learns a new set says so, in place
@@ -390,9 +440,9 @@
      (λ (ag frames _log)
        (agent-prompt! ag "SLOW down")
        ;; wait for the turn to be really under way, not just accepted
-       (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "user")
-       (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "model")
-       (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "commands")
+       (check-equal? (for/list ([_i (in-range (add1 (length boot-frames)))])
+                       (hash-ref (cdr (next-frame frames)) 'type))
+                     (cons "user" boot-frames))
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "chunk")
        (define e
          (with-handlers ([exn:fail:op? values])
@@ -432,9 +482,9 @@
     (with-agent
      (λ (ag frames _log)
        (agent-prompt! ag "SLOW down")
-       (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "user")
-       (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "model")
-       (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "commands")
+       (check-equal? (for/list ([_i (in-range (add1 (length boot-frames)))])
+                       (hash-ref (cdr (next-frame frames)) 'type))
+                     (cons "user" boot-frames))
        (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "chunk")
        (agent-cancel! ag)
        (define done (cdr (next-frame frames)))
@@ -450,17 +500,19 @@
      (λ (ag frames _log)
        (agent-prompt! ag "CRASH now")
        (define fs (frames-through frames "error"))
-       (check-equal? (frame-types fs) '("user" "model" "commands" "chunk" "error"))
+       (check-equal? (frame-types fs)
+                     (append '("user") boot-frames '("chunk" "error")))
        (check-true (string-contains? (hash-ref (cdr (last fs)) 'message) "exited")
                    (format "~a" (cdr (last fs))))
        (check-true (wait-idle ag))
        ;; no respawn loop: nothing started a process nobody asked for
        (check-equal? (length (agent-transcript ag)) 2)
-       ;; the next prompt gets a fresh agent, and a fresh session with it —
-       ;; running the same model, so nothing is said about it a second time
+       ;; the next prompt gets a fresh agent, and a fresh session with it: the
+       ;; session is a different one and says so (twice — id, then name), while
+       ;; the model and the commands have not moved and say nothing
        (agent-prompt! ag "are you back")
        (check-equal? (frame-types (frames-through frames "done"))
-                     '("user" "chunk" "chunk" "tool" "tool" "done"))
+                     '("user" "session" "session" "chunk" "chunk" "tool" "tool" "done"))
        (check-true (wait-idle ag))
        (define t (agent-transcript ag))
        (check-equal? (map (λ (e) (hash-ref e 'type)) t)
@@ -480,7 +532,8 @@
      (λ (ag frames log)
        (agent-prompt! ag "hello there")
        (check-equal? (frame-types (frames-through frames "done"))
-                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
+                     (append '("user") boot-frames
+                             '("chunk" "chunk" "tool" "tool" "done")))
        (check-true (wait-idle ag))
        (define noise
          (let loop ([n 0])
@@ -500,10 +553,114 @@
        (frames-through frames "done")
        (check-true (wait-idle ag))
        (agent-reset! ag)
-       (define f (cdr (next-frame frames)))
-       (check-equal? (hash-ref f 'type) "reset")
+       ;; a new chat is a new SESSION, which announces itself the way any
+       ;; other does; the reset is what the panels act on. The title the agent
+       ;; then writes for it may land on either side of that, so only the
+       ;; identity frame is asserted here.
+       (define fs (frame-types (frames-through frames "reset")))
+       (check-equal? (last fs) "reset" (format "~a" fs))
+       (check-true (and (member "session" fs) #t) (format "~a" fs))
        (define t (agent-transcript ag))
        (check-equal? (map (λ (e) (hash-ref e 'type)) t) '("turn" "reset")))))
+
+  ;; ---- the conversation it comes up in -------------------------------------
+  ;;
+  ;; An agent that keeps its sessions has a LAST one, and a server whose agent
+  ;; works in a stable directory can come back up in it. Boot is where that is
+  ;; decided: list, adopt the most recently updated one, replay it — or, with
+  ;; nothing stored, start a new one, which is what every boot did before.
+
+  (test-case "boot adopts the most recent stored session and replays it"
+    (with-stored-sessions
+     (λ ()
+       (with-agent
+        (λ (ag frames _log)
+          (agent-boot! ag)
+          ;; the replay is a conversation with no live turn behind it, and it
+          ;; arrives as the frames a panel already knows how to draw
+          (define fs (frames-through frames "commands"))
+          (check-equal? (frame-types fs)
+                        '("reset" "user" "chunk" "chunk" "tool" "tool" "done"
+                          "session" "model" "commands"))
+          (check-equal? (hash-ref (frame-of fs "user") 'text) "what did we do")
+          ;; no stopReason: a replay does not say how a turn ended, and the
+          ;; bridge does not invent one
+          (define done (frame-of fs "done"))
+          (check-equal? (hash-ref done 'stopReason) (json-null))
+          (check-equal? (hash-ref done 'html) (note->html-string "we shipped it"))
+          ;; the newer of the two stored sessions, not the first one listed
+          (check-equal? (agent-session-id ag) "fake-stored-new")
+          (define session (frame-of fs "session"))
+          (check-equal? (hash-ref session 'id) "fake-stored-new")
+          (check-equal? (hash-ref session 'title) "the last conversation")
+          (check-equal? (agent-session-title ag) "the last conversation")
+          ;; and the transcript is that turn, in the shape a lived one has
+          (define t (agent-transcript ag))
+          (check-equal? (length t) 1)
+          (check-equal? (car t)
+                        (hash 'type "turn"
+                              'text "what did we do"
+                              'agent "we shipped it"
+                              'tools (list (hash 'id "call-replay"
+                                                 'title "read Roadmap.rkt"
+                                                 'status "completed"))
+                              'status "done"
+                              'stopReason (json-null)
+                              'error (json-null)))
+          ;; a prompt lands on the session that was adopted, not a new one
+          (agent-prompt! ag "and now")
+          (check-equal? (frame-types (frames-through frames "done"))
+                        '("user" "chunk" "chunk" "tool" "tool" "done"))
+          (check-true (wait-idle ag))
+          (check-equal? (agent-session-id ag) "fake-stored-new")
+          ;; the raw-init opt-in was asked for on the LOAD too, so the live
+          ;; model is knowable in an adopted session as much as in a new one
+          (check-equal? (agent-model ag) "fake-model-1"))))))
+
+  (test-case "boot with nothing stored starts a new session"
+    (with-agent
+     (λ (ag frames _log)
+       (agent-boot! ag)
+       (define fs (frames-through frames "commands"))
+       (check-equal? (frame-types fs) '("session" "model" "commands"))
+       (check-equal? (hash-ref (frame-of fs "session") 'id) "fake-session-1")
+       (check-equal? (hash-ref (frame-of fs "session") 'title) (json-null))
+       ;; a boot is not a turn: nothing is busy, and there is nothing to replay
+       (check-false (agent-busy? ag))
+       (check-equal? (agent-transcript ag) '()))))
+
+  ;; The picker's two verbs, at the bridge: what is stored, and moving to one
+  ;; of them. A turn in flight owns the agent, so a load waits for another day.
+  (test-case "the stored sessions are listed, newest first, with the current one marked"
+    (with-stored-sessions
+     (λ ()
+       (with-agent
+        (λ (ag frames _log)
+          (agent-boot! ag)
+          (frames-through frames "session")
+          (define ss (agent-sessions ag))
+          (check-equal? (for/list ([s (in-list ss)]) (hash-ref s 'id))
+                        '("fake-stored-new" "fake-stored-old"))
+          (check-equal? (for/list ([s (in-list ss)]) (hash-ref s 'current))
+                        '(#t #f))
+          (check-equal? (hash-ref (car ss) 'title) "the last conversation")
+          (check-true (string? (hash-ref (car ss) 'updatedAt))))))))
+
+  (test-case "a load while a turn is running is a busy failure"
+    (with-stored-sessions
+     (λ ()
+       (with-agent
+        (λ (ag frames _log)
+          (agent-prompt! ag "SLOW down")
+          (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "user")
+          (define e
+            (with-handlers ([exn:fail:op? values])
+              (agent-load! ag "fake-stored-old")
+              #f))
+          (check-pred exn:fail:op? e)
+          (check-equal? (exn:fail:op-kind e) 'busy)
+          (agent-cancel! ag)
+          (check-true (wait-idle ag)))))))
 
   ;; ---- a command that is not an agent --------------------------------------
 
@@ -555,8 +712,10 @@
        ;; 204 means 204: nothing to render, because the stream renders it
        (check-equal? body "" body)
        (define fs (events-through in "done"))
+       ;; the boot frames are not in here: the server booted the agent when it
+       ;; came up, which is before this connection existed
        (check-equal? (for/list ([f (in-list fs)]) (hash-ref f 'type))
-                     '("user" "model" "commands" "chunk" "chunk" "tool" "tool" "done"))
+                     '("user" "chunk" "chunk" "tool" "tool" "done"))
        (check-equal? (hash-ref (car fs) 'text) "hello there")
        (define done (last fs))
        (check-equal? (hash-ref done 'stopReason) "end_turn")
@@ -586,7 +745,7 @@
        ;; talking, which is the state this 409 is about.
        (check-equal? (for/list ([f (in-list (events-through in "chunk"))])
                        (hash-ref f 'type))
-                     '("user" "model" "commands" "chunk"))
+                     '("user" "chunk"))
        (define-values (busy body) (POST port "/chat" '((text . "and another"))))
        (check-equal? busy 409 body)
        (check-true (string-contains? body "busy") body)
@@ -606,10 +765,72 @@
        (check-true (wait-idle agent))
        (define-values (code body) (POST port "/chat/new"))
        (check-equal? code 204 body)
-       (define ev (next-event in))
-       (check-not-false ev "no reset frame within the timeout")
-       (check-equal? (hash-ref (string->jsexpr (cdr ev)) 'type) "reset")
+       ;; the new session says which one it is on the way past; the reset is
+       ;; the frame the panels act on
+       (define fs (for/list ([f (in-list (events-through in "reset"))])
+                    (hash-ref f 'type)))
+       (check-equal? (last fs) "reset" (format "~a" fs))
+       (check-true (and (member "session" fs) #t) (format "~a" fs))
        (close-input-port in))))
+
+  ;; ---- the picker's routes -------------------------------------------------
+  ;;
+  ;; What is stored is JSON (a thing to draw); moving to one of them is a
+  ;; status and a stream, like every other chat verb.
+
+  (test-case "GET /chat/sessions is the agent's list, with the current one marked"
+    (with-stored-sessions
+     (λ ()
+       (with-server
+        (λ (port agent)
+          (define-values (code body) (GET port "/chat/sessions"))
+          (check-equal? code 200 body)
+          (define j (read-json (open-input-string body)))
+          (define ss (hash-ref j 'sessions))
+          (check-equal? (for/list ([s (in-list ss)]) (hash-ref s 'id))
+                        '("fake-stored-new" "fake-stored-old"))
+          ;; the server adopted the newest at boot, so that is the one you are in
+          (check-equal? (for/list ([s (in-list ss)]) (hash-ref s 'current))
+                        '(#t #f))
+          (check-equal? (hash-ref (car ss) 'title) "the last conversation"))))))
+
+  (test-case "POST /chat/load repopulates every tab: reset, the turns, the session"
+    (with-stored-sessions
+     (λ ()
+       (with-server
+        (λ (port agent)
+          ;; booted into the newest; move to the other one
+          (check-equal? (agent-session-id agent) "fake-stored-new")
+          (define in (open-events port))
+          (define-values (code body) (POST port "/chat/load" '((id . "fake-stored-old"))))
+          (check-equal? code 204 body)
+          (check-equal? body "" body)
+          (define fs (events-through in "session"))
+          (check-equal? (for/list ([f (in-list fs)]) (hash-ref f 'type))
+                        '("reset" "user" "chunk" "chunk" "tool" "tool" "done" "session"))
+          (check-equal? (hash-ref (car fs) 'type) "reset")
+          (check-equal? (hash-ref (last fs) 'id) "fake-stored-old")
+          (check-equal? (hash-ref (last fs) 'title) "an older conversation")
+          ;; and the transcript is the one that was loaded, not both of them
+          (check-equal? (length (agent-transcript agent)) 1)
+          (close-input-port in))))))
+
+  (test-case "POST /chat/load with no id is a 400, and one the agent refuses is a frame"
+    (with-stored-sessions
+     (λ ()
+       (with-server
+        (λ (port agent)
+          (define-values (code body) (POST port "/chat/load" '()))
+          (check-equal? code 400 body)
+          (define in (open-events port))
+          ;; accepted (there is nothing to know yet), and the failure is where
+          ;; everything else about the conversation is: on the stream
+          (define-values (c2 b2) (POST port "/chat/load" '((id . "nope"))))
+          (check-equal? c2 204 b2)
+          (define err (last (events-through in "error")))
+          (check-true (string-contains? (hash-ref err 'message) "nope")
+                      (format "~a" err))
+          (close-input-port in))))))
 
   ;; A browser that reloads (or connects late) missed the frames. The page is
   ;; where the conversation comes back, and everything the agent or the user
@@ -649,8 +870,12 @@
        (check-true (string-contains? body "action=\"/chat\"") body)
        (check-true (string-contains? body "data-post=\"/chat/new\"") body)
        (check-true (string-contains? body "data-post=\"/chat/cancel\"") body)
-       ;; nothing has booted the agent, so there is nothing to complete yet
-       (check-true (string-contains? body "data-commands=\"[]\"") body)
+       ;; the server booted the agent when it came up, so the panel is drawn
+       ;; knowing what it offers — no turn has been taken to learn it
+       (check-true (string-contains? body "fake-init") body)
+       ;; and the picker's button, with the routes it drives
+       (check-true (string-contains? body "data-chat-sessions=\"/chat/sessions\"") body)
+       (check-true (string-contains? body "data-chat-load=\"/chat/load\"") body)
        ;; the panel borrows the page's connection: it subscribes to the chat
        ;; event on the body's stream, and opens nothing of its own
        (check-true (string-contains? body "sse-swap=\"chat\"") body)

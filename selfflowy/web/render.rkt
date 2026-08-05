@@ -80,8 +80,11 @@
           [render-chat-panel
            (->* ((listof hash?)
                  #:send-href string? #:new-href string? #:cancel-href string?
+                 #:sessions-href string? #:load-href string?
                  #:event string?)
-                (#:model (or/c string? #f) #:commands (listof hash?))
+                (#:model (or/c string? #f)
+                 #:session-title (or/c string? #f)
+                 #:commands (listof hash?))
                 list?)]
           [render-empty-pane (-> string? #:home-href string? list?)]
           [render-error-banner (->* (string?) (#:where (or/c string? #f)) list?)]
@@ -593,8 +596,11 @@
                            #:send-href send-href
                            #:new-href new-href
                            #:cancel-href cancel-href
+                           #:sessions-href sessions-href
+                           #:load-href load-href
                            #:event event
                            #:model [model #f]
+                           #:session-title [session-title #f]
                            #:commands [commands '()])
   ;; A turn was still running when this page was rendered: the panel comes up
   ;; in that state (input disabled, stop showing) rather than idle.
@@ -627,8 +633,24 @@
                           ;; the same signal. Always drawn, shown by is-busy
                           ;; (app.css), which the server sets for a turn in
                           ;; flight and chat.js moves from there.
-                          (span ((class "sf-chat-working") (title "working"))))
+                          (span ((class "sf-chat-working") (title "working")))
+                          ;; Which conversation, when it has a name. Same
+                          ;; pattern as the model, one line down: a `session`
+                          ;; frame sets one string, and an empty one takes the
+                          ;; line away with it.
+                          (span ((class "sf-chat-session") (id "sf-chat-session"))
+                                ,(or session-title "")))
                     (div ((class "sf-chat-actions"))
+                         ;; The conversations the agent has stored for this
+                         ;; directory. The popover it opens is drawn by
+                         ;; chat.js from what the route answers — the list is
+                         ;; the agent's, and a copy rendered into the page
+                         ;; would be stale before it was read.
+                         (button ((type "button") (class "sf-chat-btn")
+                                  (data-chat-sessions ,sessions-href)
+                                  (data-chat-load ,load-href)
+                                  (title "past chats"))
+                                 "chats")
                          (button ((type "button") (class "sf-chat-btn")
                                   (data-post ,new-href) (title "new chat"))
                                  "+ new")

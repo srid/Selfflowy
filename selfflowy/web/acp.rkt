@@ -10,9 +10,14 @@
 ;;
 ;; What this owns, and why:
 ;;
-;;   * the subprocess, spawned LAZILY. A server that boots an agent nobody
-;;     talked to pays for a node process (and its credential check) on every
-;;     restart; the first prompt is what starts one.
+;;   * the subprocess, and the conversation it comes up in. Boot is EAGER
+;;     (`agent-boot!`, off the server's own start) because the panel is meant
+;;     to show your last conversation before anybody types into it: after
+;;     initialize the bridge asks for the agent's stored sessions and ADOPTS
+;;     the most recently updated one, replaying it into the transcript; with
+;;     nothing stored it starts a new one. Boot runs in its own thread, so
+;;     pages serve while it happens, and a boot that fails changes nothing —
+;;     the next prompt retries it exactly like a crash does.
 ;;   * one turn at a time. ACP would queue; a chat panel does not want a queue,
 ;;     and a second prompt while the agent is talking is a conflict the caller
 ;;     has to see — exn:fail:op with kind 'busy, the same vocabulary the write
@@ -57,13 +62,18 @@
                                (#:log-port output-port?)
                                acp-agent?)]
           [acp-agent? (-> any/c boolean?)]
+          [agent-boot! (-> acp-agent? void?)]
           [agent-prompt! (-> acp-agent? string? void?)]
           [agent-cancel! (-> acp-agent? void?)]
           [agent-reset! (-> acp-agent? void?)]
+          [agent-load! (-> acp-agent? string? void?)]
           [agent-stop! (-> acp-agent? void?)]
           [agent-busy? (-> acp-agent? boolean?)]
           [agent-model (-> acp-agent? (or/c string? #f))]
           [agent-commands (-> acp-agent? (listof hash?))]
+          [agent-sessions (-> acp-agent? (listof hash?))]
+          [agent-session-id (-> acp-agent? (or/c string? #f))]
+          [agent-session-title (-> acp-agent? (or/c string? #f))]
           [agent-transcript (-> acp-agent? (listof hash?))]))
 
 ;; The SSE event name chat frames ride under. One owner: the page that
@@ -103,9 +113,13 @@
 ;; not fatal: request_permission is answered anyway.
 (define bypass-mode "bypassPermissions")
 
-;; Boot is three small round trips against a process that just started; a turn
+;; Boot is a few small round trips against a process that just started; a turn
 ;; is a person waiting on an LLM. Only the first gets a deadline.
 (define boot-timeout-seconds 30)
+
+;; Loading a session is not small: the agent re-opens a conversation and
+;; replays every message in it before it answers. Its own, longer deadline.
+(define load-timeout-seconds 120)
 
 ;; How long a clean shutdown waits before it stops asking.
 (define stop-timeout-seconds 2)
@@ -150,13 +164,16 @@
 (struct acp-agent (command cwd broadcast log-port cust
                    sema boot-sema out-sema
                    [sp #:mutable] [stdin #:mutable] [stdout #:mutable]
-                   [session #:mutable]
+                   [session #:mutable] [session-title #:mutable]
+                   [can-list? #:mutable] [can-load? #:mutable]
                    [model #:mutable] [model-options #:mutable]
                    [config-model #:mutable] [live-model #:mutable]
                    [commands #:mutable]
                    [next-id #:mutable] [pending #:mutable]
                    [busy? #:mutable] [live-turn #:mutable]
                    [cancel-pending? #:mutable]
+                   [loading? #:mutable]
+                   [replaying? #:mutable] [replay-turn #:mutable] [replay-user #:mutable]
                    [entries #:mutable]           ; reversed
                    [spawned? #:mutable] [stopped? #:mutable]
                    [seen-kinds #:mutable]))
@@ -184,12 +201,15 @@
              (make-custodian)
              (make-semaphore 1) (make-semaphore 1) (make-semaphore 1)
              #f #f #f
-             #f
+             #f #f
+             #f #f
              #f '() #f #f
              '()
              0 (hash)
              #f #f
              #f
+             #f
+             #f #f #f
              '()
              #f #f
              (hash)))
@@ -245,6 +265,14 @@
 ;;                                            offers, the WHOLE list each
 ;;                                            time (a panel replaces what it
 ;;                                            had); each one {name,description}
+;;   {"type":"session","id","title"}          which stored conversation this
+;;                                            is: pushed when a session is
+;;                                            established (new, or adopted at
+;;                                            boot, or picked) and again when
+;;                                            its title moves. `title` is null
+;;                                            until the agent has one — it
+;;                                            writes one for you, a turn or so
+;;                                            in
 
 (define (broadcast! ag js)
   (with-handlers ([exn:fail? (λ (e) (log-line ag (format "broadcast failed: ~a" (exn-message e))))])
@@ -372,6 +400,92 @@
   (when unknown?
     (log-once! ag (format "live-model ~a" id)
                (format "the agent is running \"~a\", which its model picker does not offer" id))))
+
+;; ---- which conversation -----------------------------------------------------
+;;
+;; An agent that keeps its conversations keys them by the directory it was
+;; started in (`serve DIR` is what makes that directory stable — docs/cli.md).
+;; So there is a "last session", and a server restart that came up with an
+;; empty panel was throwing it away every time.
+;;
+;; Boot therefore ADOPTS: `session/list`, take the most recently updated one,
+;; `session/load` it. Nothing stored — or an agent that does not advertise the
+;; capabilities — is the old path, `session/new`.
+;;
+;; The id and the title are the bridge's, not a browser's: the panel names the
+;; conversation, and the picker marks which row is the one you are in.
+
+(define (agent-session-id ag)
+  (with-state ag (λ () (acp-agent-session ag))))
+
+(define (agent-session-title ag)
+  (with-state ag (λ () (acp-agent-session-title ag))))
+
+;; Callers hold `sema`. Append-only, like every other frame: a title the agent
+;; has not written yet is null, never a placeholder.
+(define (broadcast-session! ag)
+  (broadcast! ag (hash 'type "session"
+                       'id (or (acp-agent-session ag) (json-null))
+                       'title (or (acp-agent-session-title ag) (json-null)))))
+
+;; The agent writes a title for the conversation in the background and pushes
+;; it as a `session_info_update` when it changes (the Claude Code adapter pulls
+;; it at turn end). The update also carries `updatedAt`, which is not kept: it
+;; is the picker's sort key, and the picker asks for a fresh list every time it
+;; is drawn rather than tracking one.
+(define (learn-session-title! ag title)
+  (with-state ag
+    (λ ()
+      (unless (equal? title (acp-agent-session-title ag))
+        (set-acp-agent-session-title! ag title)
+        (broadcast-session! ag)))))
+
+;; ---- the stored conversations -----------------------------------------------
+
+;; What sorts the list: an ISO 8601 timestamp, which is why it can be compared
+;; as a string. A session the agent gave no timestamp sorts last, not first.
+(define (session-stamp s)
+  (or (string-or-false (hash-ref s 'updatedAt #f)) ""))
+
+;; The agent's stored sessions for THIS cwd, newest first. Raw entries —
+;; {sessionId, cwd, title, updatedAt} — the picker's shape is minted below.
+(define (list-sessions ag)
+  (define r (request! ag "session/list"
+                      (hash 'cwd (path->string (acp-agent-cwd ag)))))
+  (define raw (let ([ss (hash-ref r 'sessions '())]) (if (list? ss) ss '())))
+  (sort (for/list ([s (in-list raw)]
+                   #:when (and (hash? s) (string? (hash-ref s 'sessionId #f))))
+          s)
+        string>? #:key session-stamp))
+
+;; The name the picker showed for a session, off the same list it drew. Worth
+;; a round trip on a button press: the agent pushes a title only when it
+;; CHANGES one (at turn end), so a session loaded by id would otherwise sit
+;; nameless in the header until somebody talked to it. Best-effort — a load is
+;; not worth failing over a list.
+(define (stored-title ag sid)
+  (with-handlers ([exn:fail? (λ (_e) #f)])
+    (and (with-state ag (λ () (acp-agent-can-list? ag)))
+         (for/or ([s (in-list (list-sessions ag))])
+           (and (equal? (hash-ref s 'sessionId #f) sid)
+                (string-or-false (hash-ref s 'title #f)))))))
+
+;; What a picker draws: id, title, when, and which one you are in. Fresh from
+;; the agent every time — the bridge keeps no list, because the agent's own is
+;; the only one that is right.
+(define (agent-sessions ag)
+  (define current (agent-session-id ag))
+  (unless (with-state ag (λ () (and (alive? ag) (acp-agent-can-list? ag))))
+    (gone-fail "the agent is not running, or does not keep sessions"))
+  (define ss
+    (with-handlers ([exn:fail? (λ (e) (gone-fail (exn-message e)))])
+      (list-sessions ag)))
+  (for/list ([s (in-list ss)])
+    (define id (hash-ref s 'sessionId))
+    (hash 'id id
+          'title (or (string-or-false (hash-ref s 'title #f)) (json-null))
+          'updatedAt (or (string-or-false (hash-ref s 'updatedAt #f)) (json-null))
+          'current (equal? id current))))
 
 ;; ---- which slash commands ----------------------------------------------------
 ;;
@@ -579,7 +693,7 @@
 ;; running commentary are deliberately dropped — a chat panel that renders
 ;; everything an agent thinks is a log viewer.
 (define ignored-update-kinds
-  '("user_message_chunk" "agent_thought_chunk" "plan"))
+  '("agent_thought_chunk" "plan"))
 
 (define (handle-update! ag params)
   (define u (hash-ref params 'update (hash)))
@@ -588,6 +702,16 @@
     [(equal? kind "agent_message_chunk")
      (define text (content-text (hash-ref u 'content (hash))))
      (when (non-empty-string? text) (chunk! ag text))]
+    ;; What you said. Live, it is an echo of the prompt this bridge just sent
+    ;; and the panel already drew — dropped. During a REPLAY it is the only
+    ;; thing that says where one turn ends and the next begins.
+    [(equal? kind "user_message_chunk")
+     (define text (content-text (hash-ref u 'content (hash))))
+     (when (non-empty-string? text) (replay-user-chunk! ag text))]
+    ;; the conversation's own name, written by the agent in the background
+    [(equal? kind "session_info_update")
+     (define title (string-or-false (hash-ref u 'title #f)))
+     (when title (learn-session-title! ag title))]
     [(equal? kind "tool_call")
      (tool-call! ag
                  (hash-ref u 'toolCallId #f)
@@ -637,10 +761,18 @@
 
 ;; ---- turn bookkeeping ------------------------------------------------------
 
+;; The turn an update belongs to. A REPLAY assembles into its own, so a prompt
+;; accepted while a session is loading (the panel is up, the boot is not
+;; finished) cannot be handed somebody else's history. Callers hold `sema`.
+(define (current-turn ag)
+  (if (acp-agent-replaying? ag)
+      (or (acp-agent-replay-turn ag) (open-replay-turn! ag))
+      (acp-agent-live-turn ag)))
+
 (define (chunk! ag text)
   (with-state ag
     (λ ()
-      (define tn (acp-agent-live-turn ag))
+      (define tn (current-turn ag))
       (cond
         [tn
          (set-turn-agent! tn (string-append (turn-agent tn) text))
@@ -651,7 +783,7 @@
   (when (string? id)
     (with-state ag
       (λ ()
-        (define tn (acp-agent-live-turn ag))
+        (define tn (current-turn ag))
         (when tn
           (define t (or (find-tool tn id)
                         (let ([t (tool id title status)])
@@ -666,7 +798,7 @@
   (when (string? id)
     (with-state ag
       (λ ()
-        (define tn (acp-agent-live-turn ag))
+        (define tn (current-turn ag))
         (define t (and tn (find-tool tn id)))
         (cond
           [t
@@ -686,6 +818,68 @@
   (for/or ([t (in-list (turn-tools tn))])
     (and (equal? (tool-id t) id) t)))
 
+;; ---- replaying a loaded session ---------------------------------------------
+;;
+;; `session/load` answers by REPLAYING the whole conversation first: every
+;; message in it arrives as an ordinary session/update notification, in order,
+;; before the response comes back. There is no live turn to hang them on and
+;; nothing on the wire says where one turn ended — so the turns are
+;; reconstructed here, from the only boundary the replay has: a user message.
+;;
+;; The rule is one line long. A user chunk is BUFFERED (a prompt can arrive as
+;; several content blocks); the first agent chunk or tool call after it opens
+;; the turn with what was buffered, and the next user chunk closes it. The last
+;; turn is closed when the replay ends.
+;;
+;; What comes out is a turn of the same shape a lived one has, so the panel,
+;; the page and the transcript need to know nothing about any of this — with
+;; one honest difference: `stopReason` is null. The replay does not carry how a
+;; turn ended, and "end_turn" would be the bridge's word, not the agent's.
+
+;; Callers hold `sema`.
+(define (open-replay-turn! ag)
+  (define text (or (acp-agent-replay-user ag) ""))
+  (define tn (turn text "" '() 'running #f #f #t))
+  (set-acp-agent-replay-user! ag #f)
+  (set-acp-agent-replay-turn! ag tn)
+  (push-entry! ag tn)
+  (broadcast! ag (hash 'type "user" 'text text))
+  tn)
+
+;; Callers hold `sema`.
+(define (close-replay-turn! ag)
+  (define tn (acp-agent-replay-turn ag))
+  (when tn
+    (set-turn-status! tn 'done)
+    (set-acp-agent-replay-turn! ag #f)
+    (broadcast! ag (hash 'type "done"
+                         'stopReason (json-null)
+                         'html (note->html-string (turn-agent tn))))))
+
+(define (replay-user-chunk! ag text)
+  (with-state ag
+    (λ ()
+      (cond
+        [(acp-agent-replaying? ag)
+         ;; a user message after agent content is the next turn
+         (when (acp-agent-replay-turn ag) (close-replay-turn! ag))
+         (set-acp-agent-replay-user!
+          ag (string-append (or (acp-agent-replay-user ag) "") text))]
+        ;; live: the echo of a prompt the panel drew when it was accepted
+        [else (void)]))))
+
+;; Everything the agent has to say about this conversation is in. Whatever is
+;; still open becomes a turn — including a prompt with no answer after it,
+;; which is what a conversation interrupted mid-turn looks like.
+(define (end-replay! ag)
+  (with-state ag
+    (λ ()
+      (when (and (not (acp-agent-replay-turn ag)) (acp-agent-replay-user ag))
+        (open-replay-turn! ag))
+      (close-replay-turn! ag)
+      (set-acp-agent-replay-user! ag #f)
+      (set-acp-agent-replaying?! ag #f))))
+
 ;; ---- the subprocess --------------------------------------------------------
 
 (define (alive? ag)
@@ -694,7 +888,7 @@
 
 ;; Spawned with the environment as it stands: HOME is where the adapter's
 ;; credentials live, and the nix wrapper has already set the rest.
-(define (spawn! ag)
+(define (spawn-process! ag)
   (define-values (sp out in err)
     (in-custodian ag
       (λ ()
@@ -713,7 +907,12 @@
   (in-custodian ag (λ () (thread (λ () (reader-loop ag out)))))
   (in-custodian ag (λ () (thread (λ () (drain-log ag err)))))
   (handshake! ag)
-  (new-session! ag))
+  (void))
+
+;; A process AND a conversation. Callers hold `boot-sema`.
+(define (spawn! ag)
+  (spawn-process! ag)
+  (adopt-or-create! ag))
 
 (define (drain-log ag err)
   (let loop ()
@@ -722,25 +921,110 @@
       (log-line ag line)
       (loop))))
 
+;; What the agent says it can do. Two of them matter: whether it keeps
+;; sessions at all (`loadSession`), and whether it will list them. An agent
+;; that says neither gets a new session every boot, which is what every agent
+;; got before this.
 (define (handshake! ag)
-  (request! ag "initialize"
-            (hash 'protocolVersion protocol-version
-                  'clientCapabilities client-capabilities))
+  (define r (request! ag "initialize"
+                      (hash 'protocolVersion protocol-version
+                            'clientCapabilities client-capabilities)))
+  (define caps (let ([c (hash-ref r 'agentCapabilities (hash))]) (if (hash? c) c (hash))))
+  (define scaps (let ([c (hash-ref caps 'sessionCapabilities (hash))]) (if (hash? c) c (hash))))
+  (with-state ag
+    (λ ()
+      (set-acp-agent-can-load?! ag (eq? (hash-ref caps 'loadSession #f) #t))
+      (set-acp-agent-can-list?! ag (and (hash-ref scaps 'list #f) #t))))
   (void))
 
-;; A session is a conversation's memory. set_mode is asked for but not
-;; required: it is refused when the server runs as root, and the permission
-;; auto-answer covers that case.
+;; Boot's second half: the conversation this bridge comes up in. Callers hold
+;; `boot-sema`.
+(define (adopt-or-create! ag)
+  (define latest
+    (and (with-state ag (λ () (and (acp-agent-can-list? ag) (acp-agent-can-load? ag))))
+         ;; a list the agent will not give is not a reason to fail to boot
+         (with-handlers ([exn:fail? (λ (e)
+                                      (log-line ag (format "session/list failed: ~a"
+                                                           (exn-message e)))
+                                      #f)])
+           (let ([ss (list-sessions ag)]) (and (pair? ss) (car ss))))))
+  (cond
+    [latest (load-session! ag
+                           (hash-ref latest 'sessionId)
+                           (string-or-false (hash-ref latest 'title #f)))]
+    [else (new-session! ag)]))
+
+;; The conversation that was is over — said before the request that replaces
+;; it, not after: a title that arrives while a new session is being made
+;; belongs to the new one. Callers hold `sema`.
+(define (forget-session! ag)
+  (set-acp-agent-session! ag #f)
+  (set-acp-agent-session-title! ag #f))
+
+;; A session is a conversation's memory. Callers hold `boot-sema`.
 (define (new-session! ag)
+  (with-state ag (λ () (forget-session! ag)))
   (define r (request! ag "session/new"
                       (hash 'cwd (path->string (acp-agent-cwd ag))
                             'mcpServers '()
                             '_meta session-meta)))
   (define sid (hash-ref r 'sessionId #f))
   (unless (string? sid) (user-fail "session/new returned no sessionId"))
-  (with-state ag (λ () (set-acp-agent-session! ag sid)))
+  (establish-session! ag sid #f (hash-ref r 'configOptions '()))
+  sid)
+
+;; Adopt a stored conversation: the panel comes back up in the one you were
+;; last in. Callers hold `boot-sema`.
+;;
+;; The load REPLACES the conversation — a transcript of a session that is no
+;; longer the session would be a lie, and the panels showing it have to be
+;; cleared before the replay starts filling them again. Order on the wire:
+;; reset, the replayed turns, then the session itself.
+;;
+;; `_meta` rides along for the same reason session/new carries it: the raw
+;; init message is how the LIVE model becomes knowable, and a loaded session
+;; that did not ask would go on naming whatever the picker said.
+(define (load-session! ag sid [title #f])
+  (with-state ag
+    (λ ()
+      (forget-session! ag)
+      (set-acp-agent-entries! ag '())
+      (set-acp-agent-replay-turn! ag #f)
+      (set-acp-agent-replay-user! ag #f)
+      (set-acp-agent-replaying?! ag #t)
+      (broadcast! ag (hash 'type "reset"))))
+  (define r
+    (with-handlers ([exn:fail? (λ (e) (end-replay! ag) (raise e))])
+      (request! ag "session/load"
+                (hash 'sessionId sid
+                      'cwd (path->string (acp-agent-cwd ag))
+                      'mcpServers '()
+                      '_meta session-meta)
+                #:timeout load-timeout-seconds)))
+  (end-replay! ag)
+  (establish-session! ag sid title
+                      (if (hash? r) (hash-ref r 'configOptions '()) '()))
+  sid)
+
+;; The last three things every session needs, whichever way it was got: say
+;; which one it is, read the model off it, ask for the permission mode.
+;;
+;; A title is only ever SET here, never cleared (that happened before the
+;; request): a `session_info_update` that landed while the session was being
+;; made named this session, and would be thrown away by a #f.
+(define (establish-session! ag sid title opts)
+  (with-state ag
+    (λ ()
+      (set-acp-agent-session! ag sid)
+      (when title (set-acp-agent-session-title! ag title))
+      (broadcast-session! ag)))
   ;; the session says what it runs; a bridge that asked would be guessing
-  (learn-config-model! ag (hash-ref r 'configOptions '()))
+  (learn-config-model! ag opts)
+  (set-session-mode! ag sid))
+
+;; Permissions are asked for, not required: the request is refused when the
+;; server runs as root, and the permission auto-answer covers that case.
+(define (set-session-mode! ag sid)
   (with-handlers ([exn:fail?
                    (λ (e)
                      (log-line ag (format "set_mode ~a refused: ~a" bypass-mode (exn-message e)))
@@ -750,9 +1034,12 @@
 tool calls are allowed one at a time instead"
                                                                    bypass-mode))))))])
     (request! ag "session/set_mode" (hash 'sessionId sid 'modeId bypass-mode)))
-  sid)
+  (void))
 
-;; Spawn on demand, and only once: callers hold nothing while this runs.
+;; Spawn on demand, and only once: callers hold nothing while this runs. A
+;; process that is alive but has no session lost one (a reset that could not
+;; start its replacement) — that is a NEW chat asking to be finished, not an
+;; invitation to adopt yesterday's.
 (define (ensure-session! ag)
   (call-with-semaphore
    (acp-agent-boot-sema ag)
@@ -762,6 +1049,33 @@ tool calls are allowed one at a time instead"
        [(not (with-state ag (λ () (acp-agent-session ag)))) (new-session! ag)]
        [else (void)])
      (with-state ag (λ () (acp-agent-session ag))))))
+
+;; Boot now rather than at the first prompt: a panel that is supposed to come
+;; up showing your last conversation needs one before anybody types. Its own
+;; thread — a server that waited for a node process to start and a transcript
+;; to replay would not answer a page for seconds — and its own failure: an
+;; error frame and a log line, after which the next prompt tries again exactly
+;; as it does after a crash.
+(define (agent-boot! ag)
+  (in-custodian ag
+    (λ ()
+      (thread
+       (λ ()
+         (with-handlers ([exn:fail?
+                          (λ (e)
+                            ;; a server shutting down takes the agent's stdin
+                            ;; with it; that is not news about the boot
+                            (unless (with-state ag (λ () (acp-agent-stopped? ag)))
+                              (error-frame! ag (format "the agent did not start: ~a"
+                                                       (exn-message e)))))])
+           (ensure-session! ag))))))
+  (void))
+
+;; Something went wrong outside a turn (a boot, a load): the panel is where it
+;; is said, because there is no request left to answer.
+(define (error-frame! ag message)
+  (log-line ag message)
+  (with-state ag (λ () (broadcast! ag (hash 'type "error" 'message message)))))
 
 ;; The agent's stdout ended: it exited, or it is about to. Whoever was waiting
 ;; on an answer gets a failure instead, the live turn (if any) ends in the
@@ -782,6 +1096,11 @@ tool calls are allowed one at a time instead"
       (set-acp-agent-stdin! ag #f)
       (set-acp-agent-stdout! ag #f)
       (set-acp-agent-session! ag #f)
+      (set-acp-agent-session-title! ag #f)
+      ;; a replay the agent died in the middle of is over, however it ended
+      (set-acp-agent-replaying?! ag #f)
+      (set-acp-agent-replay-turn! ag #f)
+      (set-acp-agent-replay-user! ag #f)
       (unless stopped?
         (push-entry! ag (marker "restart"
                                 (string-append why "; the next prompt starts a new session"))))))
@@ -798,6 +1117,11 @@ tool calls are allowed one at a time instead"
   (raise (exn:fail:op "the agent has been stopped"
                       (current-continuation-marks)
                       'validation #f #f #f)))
+
+;; Nothing to ask, because there is nothing there to ask. Same kind a stopped
+;; agent raises — a route turns both into 503.
+(define (gone-fail message)
+  (raise (exn:fail:op message (current-continuation-marks) 'validation #f #f #f)))
 
 ;; Non-blocking: the turn is accepted (or refused) here and runs in its own
 ;; thread. The echoed `user` frame is what makes a second browser tab show the
@@ -848,6 +1172,38 @@ tool calls are allowed one at a time instead"
          (broadcast! ag (hash 'type "error" 'message (cdr outcome)))])
       (set-acp-agent-live-turn! ag #f)
       (set-acp-agent-busy?! ag #f))))
+
+;; ---- picking a conversation --------------------------------------------------
+
+;; Load a stored session into this bridge. Non-blocking, like a prompt: the
+;; caller gets a status, and the replay arrives as frames — a load is exactly
+;; as slow as the conversation is long, and no browser should hold a POST open
+;; for it.
+;;
+;; Refused while a turn is running or another load is in flight ('busy, the
+;; same 409 a second prompt gets). A prompt during a load is NOT refused: it
+;; waits on the boot semaphore like any prompt typed into a booting agent.
+(define (agent-load! ag sid)
+  (with-state ag
+    (λ ()
+      (when (acp-agent-stopped? ag) (stopped-fail))
+      (when (or (acp-agent-busy? ag) (acp-agent-loading? ag)) (busy-fail))
+      (set-acp-agent-loading?! ag #t)))
+  (in-custodian ag (λ () (thread (λ () (run-load ag sid)))))
+  (void))
+
+(define (run-load ag sid)
+  (with-handlers ([exn:fail?
+                   (λ (e) (error-frame! ag (format "could not load that session: ~a"
+                                                   (exn-message e))))])
+    (call-with-semaphore
+     (acp-agent-boot-sema ag)
+     (λ ()
+       ;; a session can be loaded into an agent that has died since; the
+       ;; process comes back first, and the handshake with it
+       (unless (with-state ag (λ () (alive? ag))) (spawn-process! ag))
+       (load-session! ag sid (stored-title ag sid)))))
+  (with-state ag (λ () (set-acp-agent-loading?! ag #f))))
 
 ;; A notification, not a request: the turn does not end here, it ends when the
 ;; session/prompt response comes back saying "cancelled".
@@ -950,5 +1306,6 @@ tool calls are allowed one at a time instead"
       (λ ()
         (set-acp-agent-sp! ag #f)
         (set-acp-agent-stdin! ag #f)
-        (set-acp-agent-session! ag #f))))
+        (set-acp-agent-session! ag #f)
+        (set-acp-agent-session-title! ag #f))))
   (void))

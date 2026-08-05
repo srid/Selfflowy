@@ -435,13 +435,17 @@
     (hash 'type "turn" 'text text 'agent agent 'tools tools
           'status status 'stopReason stop 'error err))
 
-  (define (panel transcript #:model [model #f] #:commands [commands '()])
+  (define (panel transcript #:model [model #f] #:commands [commands '()]
+                 #:session-title [session-title #f])
     (xstr (render-chat-panel transcript
                              #:send-href "/chat"
                              #:new-href "/chat/new"
                              #:cancel-href "/chat/cancel"
+                             #:sessions-href "/chat/sessions"
+                             #:load-href "/chat/load"
                              #:event "chat"
                              #:model model
+                             #:session-title session-title
                              #:commands commands)))
 
   ;; The commands ride in an attribute as JSON, which means two escapings meet
@@ -544,6 +548,21 @@
     (check-true (string-contains? bare "id=\"sf-chat-model\"") bare)
     (check-false (string-contains? bare "fake-model") bare)
     (check-false (string-contains? bare "unknown") bare))
+
+  ;; Which conversation, same discipline as the model: the agent's word for it,
+  ;; replayed, and an empty span waiting for a `session` frame when there is
+  ;; none. The picker's button carries the routes it drives.
+  (test-case "the header names the conversation when it has one, and offers the others"
+    (define named (panel '() #:session-title "the last conversation"))
+    (check-true (string-contains?
+                 named
+                 "<span class=\"sf-chat-session\" id=\"sf-chat-session\">the last conversation</span>")
+                named)
+    (check-true (string-contains? named "data-chat-sessions=\"/chat/sessions\"") named)
+    (check-true (string-contains? named "data-chat-load=\"/chat/load\"") named)
+    (define bare (panel '()))
+    (check-true (string-contains? bare "id=\"sf-chat-session\"") bare)
+    (check-false (string-contains? bare "conversation") bare))
 
   ;; The agent's slash commands, replayed so a reloaded page completes before
   ;; the agent says anything. An empty list is an empty list, not a missing
