@@ -284,18 +284,21 @@ $ SELFFLOWY_ACP_AGENT=/nope selfflowy serve
 selfflowy: SELFFLOWY_ACP_AGENT does not exist: /nope
 ```
 
-— exit 1, the usage code. The agent is spawned **lazily**: the first chat
-message starts the subprocess, so a server nobody talks to never runs one, and
-one that crashes is replaced on the next message (with a fresh session — the
-agent-side context is gone). Its stderr is a log sink, drained into the
-server's own stderr with an `acp:` prefix; only its stdout is protocol. Chat
-frames ride `/events` under the `chat` event name, one JSON object per event:
+— exit 1, the usage code. The agent is spawned **at startup**, in a background
+thread: the listener is up first, so pages serve while the subprocess starts
+and the last conversation replays into them (see *Sessions*). A boot that fails
+is an `error` frame and a log line, and the next chat message retries it — the
+same path a crashed agent takes, which is likewise replaced on the next message.
+Its stderr is a log sink, drained into the server's own stderr with an `acp:`
+prefix; only its stdout is protocol. Chat frames ride `/events` under the `chat`
+event name, one JSON object per event:
 `{"type":"user","text"}`, `{"type":"chunk","text"}`,
 `{"type":"tool","id","title","status"}` (the same `id` twice means the same
 line, updated), `{"type":"done","stopReason","html"}` (`html` is the turn's
 agent text rendered as Markdown), `{"type":"error","message"}`,
 `{"type":"reset"}`, `{"type":"model","name"}`,
-`{"type":"commands","commands":[{"name","description"}]}`. New keys may appear;
+`{"type":"commands","commands":[{"name","description"}]}`,
+`{"type":"session","id","title"}`. New keys may appear;
 existing ones keep their meaning.
 
 The `model` frame is which model the session is running, and it is the agent's
@@ -331,6 +334,51 @@ only when the list actually changed. A command is INVOKED as ordinary prompt
 text — `/name arguments` in a `POST /chat` — so nothing else on the wire knows
 about them.
 
+### Sessions
+
+An agent that keeps its conversations keys them by the directory it was started
+in — which is why `serve DIR` runs it in exactly that directory. So there is a
+LAST session, and the server comes up in it:
+
+- After `initialize`, if the agent advertises `loadSession` and
+  `sessionCapabilities.list`, the bridge asks `session/list` for that directory
+  and **adopts the most recently updated** session with `session/load`. Nothing
+  stored, or an agent that advertises neither: `session/new`, as before.
+- `session/load` **replays the whole conversation** as `session/update`
+  notifications and only then answers. The replay has no live turn and nothing
+  in it says where one turn ended, so the bridge reconstructs them from the one
+  boundary it has: a `user_message_chunk` opens a turn, agent chunks and tool
+  calls fill it, the next user message closes it. Replayed turns land in the
+  transcript in the same shape as lived ones, and go out as the same frames —
+  `user`, `chunk`, `tool`, `done` — so open tabs fill in as they arrive. Their
+  `stopReason` is **null**: a replay does not carry how a turn ended, and
+  `end_turn` would be a guess.
+- The `session` frame is which conversation this is. It goes out when a session
+  is established (new, adopted, or picked) and again when its title moves — the
+  agent writes the title in the background and pushes it as a
+  `session_info_update` (which also carries `updatedAt`; only the title is
+  read). `title` is null until there is one, so a fresh session says its id
+  first and its name later. The panel header shows the title, quietly, beside
+  the model.
+- `+ new` still means `session/new`: the agent-side context goes away, a
+  `session` frame names the new one, and a `reset` clears the panels.
+
+The picker is two routes. `GET /chat/sessions` asks the agent every time (its
+list is the only one that is right):
+
+```json
+{"sessions":[{"id":"…","title":"Investigate the crash",
+              "updatedAt":"2026-08-05T14:41:21.471Z","current":true}]}
+```
+
+Newest first; `title` / `updatedAt` may be `null`; `current` marks the one the
+server is in. `POST /chat/load` (form field `id`) moves to one: `204`, then a
+`reset`, the replayed turns, and the `session` frame on `/events`, so every open
+tab repopulates. `409` while a turn is running or another load is in flight;
+`503` when the agent is gone or does not keep sessions. The load is not a turn —
+it does not appear in the transcript as one, and the transcript it replaces is
+dropped, because a transcript of a session you are no longer in is a lie.
+
 A turn is accepted (and its `user` frame pushed) before the subprocess exists,
 so a cancel can arrive during the handshake. It is remembered and sent as soon
 as the prompt is on the wire: every cancelled turn ends the same way, a `done`
@@ -347,6 +395,8 @@ Routes:
 | `POST /chat` | prompt the agent; form field `text` (empty after trimming is `400`). `204` — what the panel draws comes back over `/events`, so every open tab stays in step. `409` with a terse `text/plain` body while a turn is running, `503` when the agent is gone |
 | `POST /chat/new` | new chat: the agent-side context goes away, `204`, and a `reset` frame clears every panel |
 | `POST /chat/cancel` | cancel the turn in flight, `204` (also while the agent is still booting); the `done` frame (`stopReason` `cancelled`) follows on its own |
+| `GET /chat/sessions` | the agent's stored conversations for this directory, JSON (see *Sessions*); `503` while the agent is gone |
+| `POST /chat/load` | load one of them; form field `id` (missing is `400`). `204` — the reset, the replayed turns and the `session` frame come back over `/events`. `409` while a turn or another load is running, `503` when the agent is gone |
 | `GET /api/tree` | byte-identical to `selfflowy tree` |
 | `GET /api/agenda` | byte-identical to `selfflowy agenda --json` |
 | `GET /static/*` | files under `selfflowy/web/static/` |
@@ -362,7 +412,10 @@ The chat panel (a `>_ agent` button, bottom right; open state remembered in
 `localStorage`) is server-rendered from the bridge's transcript on every page
 load — frames are ephemeral, so a reload or a second tab replays instead of
 missing the conversation — and kept live by `static/chat.js` off the page's one
-SSE connection. Its header names the model when the agent has reported one.
+SSE connection. Its header names the model when the agent has reported one, and
+the conversation when it has a title. The `chats` button beside `+ new` opens a
+popover over `GET /chat/sessions` — newest first, the current one marked, ↑/↓
+and Enter or a click to load one, Esc to close.
 Agent text is Markdown at render time, same as titles and notes; what you typed
 and a tool's title never are.
 
