@@ -111,7 +111,15 @@
 ;; below is guarded by `sema`, except the spawn/session handshake, which takes
 ;; `boot-sema` (never both at once, and never `sema` around a blocking call).
 ;; out-sema serializes writes to the agent's stdin: three threads write there.
-(struct acp-agent (command cwd broadcast log-port
+;;
+;; `cust` is what the subprocess and the bridge's threads are created under.
+;; It matters because a prompt arrives on an HTTP request's thread, and the
+;; web server gives every connection a custodian it shuts down as soon as the
+;; response is written — which would take the turn thread, the reader, and
+;; the agent process with it the moment the 204 went out. The bridge's own
+;; custodian lives as long as the bridge, not as long as the request that
+;; woke it (and is itself a child of the server's, so stopping still stops).
+(struct acp-agent (command cwd broadcast log-port cust
                    sema boot-sema out-sema
                    [sp #:mutable] [stdin #:mutable] [stdout #:mutable]
                    [session #:mutable]
@@ -141,6 +149,7 @@
   (acp-agent (simple-form-path (if (path? command) command (string->path command)))
              (simple-form-path (if (path? cwd) cwd (string->path cwd)))
              broadcast log-port
+             (make-custodian)
              (make-semaphore 1) (make-semaphore 1) (make-semaphore 1)
              #f #f #f
              #f
@@ -152,6 +161,11 @@
 
 (define (with-state ag proc)
   (call-with-semaphore (acp-agent-sema ag) proc))
+
+;; Anything that must outlive the call that started it — the subprocess, its
+;; pipes, the reader threads, a turn — is created in here.
+(define (in-custodian ag thunk)
+  (parameterize ([current-custodian (acp-agent-cust ag)]) (thunk)))
 
 ;; ---- the log ---------------------------------------------------------------
 
@@ -474,8 +488,10 @@
 ;; credentials live, and the nix wrapper has already set the rest.
 (define (spawn! ag)
   (define-values (sp out in err)
-    (parameterize ([current-directory (acp-agent-cwd ag)])
-      (subprocess #f #f #f (acp-agent-command ag))))
+    (in-custodian ag
+      (λ ()
+        (parameterize ([current-directory (acp-agent-cwd ag)])
+          (subprocess #f #f #f (acp-agent-command ag))))))
   (define restart?
     (with-state ag
       (λ ()
@@ -486,8 +502,8 @@
         (begin0 (acp-agent-spawned? ag)
           (set-acp-agent-spawned?! ag #t)))))
   (when restart? (log-line ag "restarted the agent"))
-  (thread (λ () (reader-loop ag out)))
-  (thread (λ () (drain-log ag err)))
+  (in-custodian ag (λ () (thread (λ () (reader-loop ag out)))))
+  (in-custodian ag (λ () (thread (λ () (drain-log ag err)))))
   (handshake! ag)
   (new-session! ag))
 
@@ -587,7 +603,7 @@ tool calls are allowed one at a time instead"
         (push-entry! ag tn)
         (broadcast! ag (hash 'type "user" 'text text))
         tn)))
-  (thread (λ () (run-turn ag tn)))
+  (in-custodian ag (λ () (thread (λ () (run-turn ag tn)))))
   (void))
 
 (define (run-turn ag tn)
