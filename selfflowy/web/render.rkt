@@ -76,6 +76,11 @@
                 (#:zoom-base (or/c string? #f)
                  #:toggle-base (or/c string? #f))
                 list?)]
+          [render-chat-panel
+           (-> (listof hash?)
+               #:send-href string? #:new-href string? #:cancel-href string?
+               #:event string?
+               list?)]
           [render-empty-pane (-> string? #:home-href string? list?)]
           [render-error-banner (->* (string?) (#:where (or/c string? #f)) list?)]
           [page->html-string (-> any/c string?)]
@@ -103,7 +108,7 @@
 (define web-static-prefix "/static/")
 
 (define web-stylesheets '("app.css"))
-(define web-scripts '("htmx.min.js" "sse.js" "collapse.js"))
+(define web-scripts '("htmx.min.js" "sse.js" "collapse.js" "chat.js"))
 
 (define (static-href name) (string-append web-static-prefix name))
 
@@ -519,6 +524,104 @@
 ;; xexpr->string is enough for those.
 (define (page->html-string page)
   (string-append "<!DOCTYPE html>\n" (xexpr->string page)))
+
+;; ---- chat panel -----------------------------------------------------------
+;;
+;; The agent's conversation, replayed from the bridge's transcript (frames are
+;; ephemeral: a browser that connects late, or reloads, missed them). From
+;; there static/chat.js keeps it live off the page's ONE SSE connection.
+;;
+;; The URLs are the route layer's, and so is the SSE event name — a renderer
+;; that spelled "chat" here would be a second owner of the wire format.
+;;
+;; What is Markdown and what is not: a FINISHED turn's agent text gets the
+;; same treatment a note gets. A running or failed turn's text is a fragment,
+;; so it stays verbatim (chat.js accumulates chunks as text and swaps in the
+;; server's HTML when the `done` frame lands). User text and tool titles are
+;; never Markdown — they are strings in an xexpr, which is what escapes them.
+
+(define tool-glyphs #hash(("completed" . "✓") ("failed" . "✗")))
+
+(define (chat-tool-xexpr t)
+  (define status (chat-string t 'status "pending"))
+  `(div ((class "sf-chat-tool")
+         (data-tool-id ,(chat-string t 'id ""))
+         (data-status ,status))
+        (span ((class "sf-chat-tool-glyph")) ,(hash-ref tool-glyphs status "⚙"))
+        (span ((class "sf-chat-tool-title")) ,(chat-string t 'title ""))))
+
+;; A transcript field is JSON: a missing one and an explicit null are the
+;; same nothing, and neither may reach xexpr->string.
+(define (chat-string h k [default #f])
+  (define v (hash-ref h k #f))
+  (if (string? v) v default))
+
+(define (chat-turn-xexpr e)
+  (define status (chat-string e 'status "done"))
+  (define text (chat-string e 'agent ""))
+  (define stop (chat-string e 'stopReason))
+  (define err (chat-string e 'error))
+  `(div ((class "sf-chat-turn"))
+        (div ((class "sf-chat-msg is-user")) ,(chat-string e 'text ""))
+        (div ((class "sf-chat-msg is-agent"))
+             ,@(if (equal? status "done")
+                   (note->xexprs text)
+                   (list text)))
+        ,@(for/list ([t (in-list (hash-ref e 'tools '()))]
+                     #:when (hash? t))
+            (chat-tool-xexpr t))
+        ,@(if err (list `(div ((class "sf-chat-msg is-error")) ,err)) '())
+        ,@(if (and stop (not (equal? stop "end_turn")))
+              (list `(div ((class "sf-chat-note")) ,stop))
+              '())))
+
+;; Not a turn: the conversation moved. A live `reset` clears the panel; a
+;; replayed one is a line across it, because the turns above it happened.
+(define (chat-marker-xexpr e)
+  (define type (chat-string e 'type ""))
+  `(div ((class "sf-chat-sep"))
+        ,(or (chat-string e 'message) (if (equal? type "reset") "new chat" type))))
+
+(define (chat-entry-xexpr e)
+  (if (equal? (chat-string e 'type "") "turn")
+      (chat-turn-xexpr e)
+      (chat-marker-xexpr e)))
+
+(define (render-chat-panel transcript
+                           #:send-href send-href
+                           #:new-href new-href
+                           #:cancel-href cancel-href
+                           #:event event)
+  ;; A turn was still running when this page was rendered: the panel comes up
+  ;; in that state (input disabled, stop showing) rather than idle.
+  (define busy?
+    (for/or ([e (in-list transcript)]) (equal? (chat-string e 'status) "running")))
+  `(div ((class "sf-chat-dock"))
+        (button ((type "button") (class "sf-chat-open") (id "sf-chat-toggle")
+                 (aria-label "toggle the agent panel"))
+                ">_ agent")
+        (aside ((class ,(classes "sf-chat" (and busy? "is-busy"))) (id "sf-chat"))
+               (div ((class "sf-chat-head"))
+                    (span ((class "sf-chat-title")) "agent · claude code")
+                    (button ((type "button") (class "sf-chat-btn")
+                             (data-post ,new-href) (title "new chat"))
+                            "+ new"))
+               ;; Frames land here: the htmx sse extension would swap the raw
+               ;; JSON in, and chat.js cancels that and keeps the data. One
+               ;; connection, two consumers.
+               (div ((class "sf-chat-sink") (id "sf-chat-sink")
+                     (sse-swap ,event) (hidden "hidden")))
+               (div ((class "sf-chat-body") (id "sf-chat-body"))
+                    ,@(for/list ([e (in-list transcript)]) (chat-entry-xexpr e)))
+               (form ((class "sf-chat-form") (id "sf-chat-form")
+                      (action ,send-href) (method "post"))
+                     (input ((class "sf-chat-input") (name "text") (type "text")
+                             (autocomplete "off") (placeholder "message the agent")
+                             ,@(if busy? '((disabled "disabled")) '())))
+                     (button ((type "submit") (class "sf-chat-send")) "send")
+                     (button ((type "button") (class "sf-chat-stop")
+                              (data-post ,cancel-href))
+                             "stop")))))
 
 ;; ---- zoom -----------------------------------------------------------------
 
