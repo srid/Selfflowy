@@ -22,7 +22,7 @@
          selfflowy/load
          selfflowy/ops
          (only-in selfflowy/paths dir-roots)
-         (only-in selfflowy/web/acp acp-command-problem)
+         (only-in selfflowy/acp acp-command-problem)
          selfflowy/web/serve)
 (define exit-ok 0)
 (define exit-usage 1)

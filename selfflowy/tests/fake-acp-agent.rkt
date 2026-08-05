@@ -4,7 +4,7 @@
 ;; A scripted ACP agent, for testing the bridge without an LLM.
 ;;
 ;; It speaks just enough of the protocol to be indistinguishable from a real
-;; agent as far as selfflowy/web/acp is concerned: line-delimited JSON-RPC on
+;; agent as far as selfflowy/acp is concerned: line-delimited JSON-RPC on
 ;; stdio, initialize / session/new / session/load / session/list /
 ;; session/set_mode, one turn per session/prompt, session/cancel as a
 ;; notification, and session/update notifications on the way.

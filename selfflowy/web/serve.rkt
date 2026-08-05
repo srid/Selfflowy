@@ -23,9 +23,10 @@
 ;;
 ;; Live updates are three parts that only meet here: the store knows WHAT the
 ;; outlines are, the watcher knows WHEN they moved, the hub knows WHO is
-;; listening. None of them knows about the other two. The ACP bridge is a
-;; fourth of the same kind — it pushes `chat` through the same hub and has
-;; never heard of HTTP; the /chat routes below are the only place the two meet.
+;; listening. None of them knows about the other two. The agent conversation
+;; (web/chat, over selfflowy/acp) is a fourth of the same kind — it pushes
+;; `chat` through the same hub and has never heard of HTTP; the /chat routes
+;; below are the only place the two meet.
 ;;
 ;; The chat routes answer with a STATUS, never with content: what a panel
 ;; draws arrives over the stream, so every open tab shows the same
@@ -56,7 +57,7 @@
          (only-in selfflowy/ops exn:fail:op? exn:fail:op-kind)
          (only-in selfflowy/paths file-label roots-base)
          selfflowy/store
-         selfflowy/web/acp
+         selfflowy/web/chat
          selfflowy/web/events
          selfflowy/web/render
          selfflowy/web/watch)
@@ -170,26 +171,26 @@
 
 ;; ---- handlers: the chat panel ---------------------------------------------
 
-;; Replayed from the bridge's transcript on every page load: frames are
-;; ephemeral, and the bridge is the only thing that remembers a turn. No
-;; agent, no panel — `serve` refuses to start without one (docs/cli.md), so
-;; that is a test's server, not a user's.
+;; Replayed from the conversation's transcript on every page load: frames are
+;; ephemeral, and web/chat is the only thing that remembers a turn. No agent,
+;; no panel — `serve` refuses to start without one (docs/cli.md), so that is a
+;; test's server, not a user's.
 (define (chat-panel agent)
   (and agent
-       (render-chat-panel (agent-transcript agent)
+       (render-chat-panel (chat-transcript agent)
                           #:send-href chat-href
                           #:new-href chat-new-href
                           #:cancel-href chat-cancel-href
                           #:sessions-href chat-sessions-href
                           #:load-href chat-load-href
                           #:event acp-event-name
-                          #:model (agent-model agent)
-                          #:session-title (agent-session-title agent)
-                          #:commands (agent-commands agent))))
+                          #:model (chat-model agent)
+                          #:session-title (chat-session-title agent)
+                          #:commands (chat-commands agent))))
 
-;; The bridge's failure kinds, as statuses: 'busy is a second prompt while a
-;; turn runs, 'validation is an agent that has been stopped. Terse text/plain
-;; bodies — the panel shows them as one inline line.
+;; The conversation's failure kinds, as statuses: 'busy is a second prompt
+;; while a turn runs, 'validation is an agent that has been stopped. Terse
+;; text/plain bodies — the panel shows them as one inline line.
 (define (with-agent-op proc)
   (with-handlers ([exn:fail:op?
                    (λ (e)
@@ -215,19 +216,19 @@
     [else
      (define text (form-field req #"text"))
      (if text
-         (with-agent-op (λ () (agent-prompt! agent text) (no-content-response)))
+         (with-agent-op (λ () (chat-prompt! agent text) (no-content-response)))
          (text-response "chat: a message is required\n" #:code 400))]))
 
 ;; New chat and cancel say nothing either: the `reset` / `done` frame that
 ;; follows is what every open panel acts on.
 (define (chat-new-handler agent)
   (if agent
-      (with-agent-op (λ () (agent-reset! agent) (no-content-response)))
+      (with-agent-op (λ () (chat-reset! agent) (no-content-response)))
       (no-agent-response)))
 
 (define (chat-cancel-handler agent)
   (if agent
-      (with-agent-op (λ () (agent-cancel! agent) (no-content-response)))
+      (with-agent-op (λ () (chat-cancel! agent) (no-content-response)))
       (no-agent-response)))
 
 ;; The picker's two routes. The list is asked of the AGENT on every request —
@@ -236,7 +237,7 @@
 (define (chat-sessions-handler agent)
   (if agent
       (with-agent-op
-       (λ () (json-response (hash 'sessions (agent-sessions agent)))))
+       (λ () (json-response (hash 'sessions (chat-sessions agent)))))
       (no-agent-response)))
 
 ;; Picking one says nothing either: the reset, the replayed turns and the
@@ -247,7 +248,7 @@
     [else
      (define id (form-field req #"id"))
      (if id
-         (with-agent-op (λ () (agent-load! agent id) (no-content-response)))
+         (with-agent-op (λ () (chat-load! agent id) (no-content-response)))
          (text-response "chat: a session id is required\n" #:code 400))]))
 
 ;; ---- handlers: pages and JSON ---------------------------------------------
@@ -340,7 +341,7 @@
      [("today") (λ (req) (today-handler st agent))]
      ;; mounted, not understood: what an event MEANS lives in web/events
      [("events") (λ (req) (hub-response hub))]
-     ;; the chat panel's verbs. What they DO lives in web/acp; this layer
+     ;; the chat panel's verbs. What they DO lives in web/chat; this layer
      ;; only turns a request into a call and a failure into a status.
      [("chat") #:method "post" (λ (req) (chat-handler agent req))]
      [("chat" "new") #:method "post" (λ (req) (chat-new-handler agent))]
@@ -378,8 +379,8 @@
 ;; #:acp-command is the agent `serve` chats with — #f means there is none, and
 ;; the CLI never passes #f (it refuses to start without one; see docs/cli.md).
 ;; #:agent-cwd is the directory it works in; #f means the outlines' own.
-;; #:on-agent is handed the bridge once it exists: the seam for tests, and for
-;; anything that wants to prompt the agent without an HTTP request.
+;; #:on-agent is handed the conversation once it exists: the seam for tests,
+;; and for anything that wants to prompt the agent without an HTTP request.
 (define (start-server #:port [port 8080]
                       #:bind [bind "127.0.0.1"]
                       #:files files
@@ -397,9 +398,9 @@
   ;; moves with it. Nothing is spawned here; construction stays cheap.
   (define agent
     (and acp-command
-         (make-acp-agent #:command acp-command
-                         #:cwd (or agent-cwd (roots-base files))
-                         #:broadcast (λ (name data) (hub-broadcast! hub name data)))))
+         (make-chat #:command acp-command
+                    #:cwd (or agent-cwd (roots-base files))
+                    #:broadcast (λ (name data) (hub-broadcast! hub name data)))))
   (define confirm (make-async-channel 1))
   (define stop
     (serve #:dispatch (make-dispatcher st hub agent)
@@ -422,12 +423,12 @@
                    (λ () (hub-broadcast! hub "outline"
                                          (number->string (store-revision st))))))
   (when agent (on-agent agent))
-  ;; And only once there is a listener here too: the bridge boots in its own
+  ;; And only once there is a listener here too: the agent boots in its own
   ;; thread, so pages serve while the agent starts and the last conversation
   ;; replays into them. A failure is a frame, not a server that did not come up.
-  (when agent (agent-boot! agent))
+  (when agent (chat-boot! agent))
   (on-listen bound)
   (λ ()
     (stop-watcher)
-    (when agent (agent-stop! agent))
+    (when agent (chat-stop! agent))
     (stop)))
