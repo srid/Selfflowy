@@ -251,13 +251,32 @@ dev shell (so `just serve`) default it to the bundled Claude Code adapter,
 pinned, never fetched at run time. Exporting the variable yourself wins, which
 is how you point `serve` at a different agent.
 
+Unset, or pointing at a file that is missing or not executable, is a **usage
+error**: nothing binds a port and the reason goes to stderr naming the
+variable —
+
+```console
+$ selfflowy serve
+selfflowy: SELFFLOWY_ACP_AGENT is not set; serve needs the path to an ACP agent (docs/cli.md)
+$ SELFFLOWY_ACP_AGENT=/nope selfflowy serve
+selfflowy: SELFFLOWY_ACP_AGENT does not exist: /nope
+```
+
+— exit 1, the usage code. The agent is spawned **lazily**: the first chat
+message starts the subprocess, so a server nobody talks to never runs one, and
+one that crashes is replaced on the next message (with a fresh session — the
+agent-side context is gone). Its stderr is a log sink, drained into the
+server's own stderr with an `acp:` prefix; only its stdout is protocol. Chat
+frames ride `/events` under the `chat` event name; the routes that send
+messages are not built yet.
+
 Routes:
 
 | Route | Body |
 |-------|------|
 | `GET /` | HTML page (Workflowy-style skin from `selfflowy/web/render.rkt`) |
 | `GET /today` | the first node titled with today's ISO date (the Daily day node), zoomed; terse empty state when there is none yet |
-| `GET /events` | `text/event-stream`, never ends. `event: outline` with the store revision as its data whenever a watched file reloaded, plus one at local midnight; `:hb` comment every 15s so proxies leave it alone |
+| `GET /events` | `text/event-stream`, never ends. `event: outline` with the store revision as its data whenever a watched file reloaded, plus one at local midnight; `event: chat` with one JSON frame from the agent per line; `:hb` comment every 15s so proxies leave it alone |
 | `GET /api/tree` | byte-identical to `selfflowy tree` |
 | `GET /api/agenda` | byte-identical to `selfflowy agenda --json` |
 | `GET /static/*` | files under `selfflowy/web/static/` |
@@ -291,8 +310,9 @@ A broken file pushes an event too — the banner appearing IS the news — so th
 revision moves on a failed reload as well as a good one. It is a counter, not
 a version: compare it, do not parse it.
 
-Exit codes: 0 on clean shutdown, 1 on bad flags or a port it cannot bind,
-3 when an outline path does not exist.
+Exit codes: 0 on clean shutdown, 1 on bad flags, a port it cannot bind, or a
+missing / unusable `SELFFLOWY_ACP_AGENT`; 3 when an outline path does not
+exist.
 
 There is no static HTML export — `curl http://127.0.0.1:8080/ > snap.html`
 if you want one.
