@@ -96,8 +96,13 @@
 ;; One turn: what was asked, the agent text as it accumulated, the tool lines
 ;; with their latest status (newest first until serialized), and how it ended.
 ;; status: 'running | 'done | 'error.
+;;
+;; `sent?` is whether session/prompt is on the wire yet. A turn is accepted
+;; long before that (the subprocess may not even exist), and a cancel that
+;; arrives in between has nothing the agent could match it against.
 (struct turn (text [agent #:mutable] [tools #:mutable]
-                   [status #:mutable] [stop #:mutable] [err #:mutable]))
+                   [status #:mutable] [stop #:mutable] [err #:mutable]
+                   [sent? #:mutable]))
 
 (struct tool (id [title #:mutable] [status #:mutable]))
 
@@ -125,6 +130,7 @@
                    [session #:mutable]
                    [next-id #:mutable] [pending #:mutable]
                    [busy? #:mutable] [live-turn #:mutable]
+                   [cancel-pending? #:mutable]
                    [entries #:mutable]           ; reversed
                    [spawned? #:mutable] [stopped? #:mutable]
                    [seen-kinds #:mutable]))
@@ -155,6 +161,7 @@
              #f
              0 (hash)
              #f #f
+             #f
              '()
              #f #f
              (hash)))
@@ -280,13 +287,20 @@
 
 ;; -> the result jsexpr. Raises when the agent answered with an error, said
 ;; nothing before the deadline, or died with the question outstanding.
-(define (request! ag method params #:timeout [timeout boot-timeout-seconds])
+;;
+;; `after-send` runs once the request is on the wire and before the wait —
+;; the only moment from which a follow-up notification about THIS request is
+;; meaningful to the agent (see the pending cancel).
+(define (request! ag method params
+                  #:timeout [timeout boot-timeout-seconds]
+                  #:after-send [after-send void])
   (define id (next-id! ag))
   (define ch (make-async-channel))
   (register-pending! ag id ch)
   (define answer
     (with-handlers ([exn:fail? (λ (e) (forget-pending! ag id) (raise e))])
       (send-line! ag (hash 'jsonrpc "2.0" 'id id 'method method 'params params))
+      (after-send)
       (if timeout (sync/timeout timeout ch) (sync ch))))
   (forget-pending! ag id)
   (cond
@@ -597,7 +611,10 @@ tool calls are allowed one at a time instead"
       (λ ()
         (when (acp-agent-stopped? ag) (stopped-fail))
         (when (acp-agent-busy? ag) (busy-fail))
-        (define tn (turn text "" '() 'running #f #f))
+        (define tn (turn text "" '() 'running #f #f #f))
+        ;; a cancel left over from a turn that died before it could be sent
+        ;; belongs to that turn, not this one
+        (set-acp-agent-cancel-pending?! ag #f)
         (set-acp-agent-busy?! ag #t)
         (set-acp-agent-live-turn! ag tn)
         (push-entry! ag tn)
@@ -613,7 +630,8 @@ tool calls are allowed one at a time instead"
       (cons 'ok (request! ag "session/prompt"
                           (hash 'sessionId sid
                                 'prompt (list (hash 'type "text" 'text (turn-text tn))))
-                          #:timeout #f))))
+                          #:timeout #f
+                          #:after-send (λ () (flush-cancel! ag tn sid))))))
   (with-state ag
     (λ ()
       (cond
@@ -636,11 +654,43 @@ tool calls are allowed one at a time instead"
 
 ;; A notification, not a request: the turn does not end here, it ends when the
 ;; session/prompt response comes back saying "cancelled".
+;;
+;; A turn is accepted before it is sent — spawning the agent and shaking hands
+;; takes seconds, and a person who types and immediately hits stop is inside
+;; that window. There is no session to name yet, and a session/cancel that
+;; arrives before the prompt names a turn the agent has never heard of, so the
+;; cancel is REMEMBERED and sent by run-turn the moment the prompt is on the
+;; wire. Either way the turn ends the one way it can: a `done` frame with
+;; stopReason cancelled.
 (define (agent-cancel! ag)
-  (define sid (with-state ag (λ () (and (acp-agent-busy? ag) (acp-agent-session ag)))))
-  (when sid
-    (with-handlers ([exn:fail? (λ (e) (log-line ag (format "cancel failed: ~a" (exn-message e))))])
-      (notify! ag "session/cancel" (hash 'sessionId sid))))
+  (define sid
+    (with-state ag
+      (λ ()
+        (define tn (acp-agent-live-turn ag))
+        (define sid (acp-agent-session ag))
+        (cond
+          [(not (and (acp-agent-busy? ag) tn)) #f]
+          [(and (turn-sent? tn) sid) sid]
+          [else (set-acp-agent-cancel-pending?! ag #t) #f]))))
+  (when sid (send-cancel! ag sid))
+  (void))
+
+;; The prompt is on the wire. Mark it, and take any cancel that was waiting
+;; for exactly this moment.
+(define (flush-cancel! ag tn sid)
+  (define pending
+    (with-state ag
+      (λ ()
+        (set-turn-sent?! tn #t)
+        (begin0 (acp-agent-cancel-pending? ag)
+          (set-acp-agent-cancel-pending?! ag #f)))))
+  (when pending (send-cancel! ag sid)))
+
+;; A cancel the agent cannot hear is not worth failing a caller over: the turn
+;; is ending regardless (the reader will see the prompt fail, or EOF).
+(define (send-cancel! ag sid)
+  (with-handlers ([exn:fail? (λ (e) (log-line ag (format "cancel failed: ~a" (exn-message e))))])
+    (notify! ag "session/cancel" (hash 'sessionId sid)))
   (void))
 
 ;; Wait for the live turn to settle. -> #t when it did.

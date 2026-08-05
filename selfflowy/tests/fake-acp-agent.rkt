@@ -56,7 +56,8 @@
 
 (define session-id "fake-session-1")
 
-;; Set by a session/cancel notification, cleared at the start of every turn.
+;; Set by a session/cancel notification, cleared when a prompt is accepted —
+;; both in the reading loop, so the two stay in the order they arrived.
 (define cancelled? (box #f))
 
 ;; The permission answer the turn is waiting for, posted by the main loop.
@@ -101,8 +102,10 @@
   (sync/timeout 30 permission-ch))
 
 ;; The whole script, in one thread. Answers the request itself at the end.
+;; The cancelled? box is cleared by the ACCEPTING loop, not here: clearing it
+;; in this thread races a session/cancel that follows the prompt immediately,
+;; and would swallow it.
 (define (run-turn! id text)
-  (set-box! cancelled? #f)
   (noise! (format "fake-acp-agent: turn for ~s" text))
   (chunk! "hello ")
   (when (string-contains? text "CRASH")
@@ -160,6 +163,7 @@
     [(equal? method "session/cancel") (set-box! cancelled? #t)]
     [(equal? method "session/prompt")
      (define text (prompt-text params))
+     (set-box! cancelled? #f)
      (thread (λ () (run-turn! id text)))
      (void)]
     [id

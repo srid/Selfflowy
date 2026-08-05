@@ -250,6 +250,24 @@
        (agent-cancel! ag)
        (check-true (wait-idle ag)))))
 
+  ;; The stop button is reachable the instant the prompt is accepted, and the
+  ;; agent does not exist yet at that instant — spawning it and shaking hands
+  ;; takes seconds. A cancel in that window used to be a silent no-op and the
+  ;; turn ran to completion.
+  (test-case "a cancel before the agent has booted still ends the turn"
+    (with-agent
+     (λ (ag frames _log)
+       (agent-prompt! ag "SLOW down")
+       ;; no session, no subprocess, no chunk: nothing but the echoed prompt
+       (check-equal? (hash-ref (cdr (next-frame frames)) 'type) "user")
+       (agent-cancel! ag)
+       (define fs (frames-through frames "done"))
+       (check-equal? (hash-ref (cdr (last fs)) 'stopReason) "cancelled")
+       (check-true (wait-idle ag))
+       (define t (agent-transcript ag))
+       (check-equal? (length t) 1)
+       (check-equal? (hash-ref (car t) 'stopReason) "cancelled"))))
+
   (test-case "cancel ends the turn through its own response"
     (with-agent
      (λ (ag frames _log)
@@ -401,8 +419,8 @@
        (define-values (code _b) (POST port "/chat" '((text . "SLOW one"))))
        (check-equal? code 204)
        ;; Under way, not merely accepted: the `user` frame goes out before the
-       ;; subprocess even exists, and a cancel with no session yet cancels
-       ;; nothing. The first chunk is the agent actually talking.
+       ;; subprocess even exists. The first chunk is the agent actually
+       ;; talking, which is the state this 409 is about.
        (check-equal? (for/list ([f (in-list (events-through in "chunk"))])
                        (hash-ref f 'type))
                      '("user" "chunk"))
