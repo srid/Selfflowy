@@ -621,7 +621,13 @@
                     ;; span's (app.css), so a `model` frame sets one string.
                     (span ((class "sf-chat-title")) "agent · claude code"
                           (span ((class "sf-chat-model") (id "sf-chat-model"))
-                                ,(or model "")))
+                                ,(or model ""))
+                          ;; A running turn is visible on the floating toggle,
+                          ;; which an OPEN panel hides — so the header carries
+                          ;; the same signal. Always drawn, shown by is-busy
+                          ;; (app.css), which the server sets for a turn in
+                          ;; flight and chat.js moves from there.
+                          (span ((class "sf-chat-working") (title "working"))))
                     (div ((class "sf-chat-actions"))
                          (button ((type "button") (class "sf-chat-btn")
                                   (data-post ,new-href) (title "new chat"))

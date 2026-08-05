@@ -493,6 +493,10 @@
     (define s (panel (list (turn "go" "half a **sent"
                                  #:status "running" #:stop (json-null)))))
     (check-true (string-contains? s "sf-chat is-busy") s)
+    ;; an open panel hides the toggle that breathes, so the header carries the
+    ;; working dot — drawn either way, and shown by that is-busy class
+    (check-true (string-contains? s "sf-chat-working") s)
+    (check-true (string-contains? (panel '()) "sf-chat-working") s)
     (check-true (string-contains? s "disabled=\"disabled\"") s)
     ;; mid-stream text is a fragment; Markdown waits for the done frame
     (check-true (string-contains? s "half a **sent") s)

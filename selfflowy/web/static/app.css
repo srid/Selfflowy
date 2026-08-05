@@ -617,6 +617,24 @@ body.sf-body:has(.sf-chat.is-open) .sf-main {
 
 .sf-chat-model:not(:empty)::before { content: " · "; }
 
+/* a turn running behind an OPEN panel: the toggle that breathes is hidden
+   under it, so the header says it instead — one dot, the same accent and the
+   same rhythm as the toggle's ring */
+.sf-chat-working {
+  display: none;
+  width: 0.4375rem;
+  height: 0.4375rem;
+  margin-left: 0.5rem;
+  border-radius: 50%;
+  background: var(--green);
+  vertical-align: middle;
+}
+
+.sf-chat.is-busy .sf-chat-working {
+  display: inline-block;
+  animation: sf-chat-glow 1.8s ease-in-out infinite;
+}
+
 .sf-chat-actions { display: flex; align-items: center; gap: 0.375rem; }
 
 .sf-chat-btn, .sf-chat-send, .sf-chat-stop {
@@ -843,4 +861,7 @@ body.sf-body:has(.sf-chat.is-open) .sf-main {
 
   /* the border still marks busy; only the motion drops out */
   .sf-chat-dock.is-busy .sf-chat-open { animation: none; }
+
+  /* likewise the dot: it stays, it just stops breathing */
+  .sf-chat.is-busy .sf-chat-working { animation: none; }
 }
