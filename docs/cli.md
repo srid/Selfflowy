@@ -267,8 +267,12 @@ message starts the subprocess, so a server nobody talks to never runs one, and
 one that crashes is replaced on the next message (with a fresh session — the
 agent-side context is gone). Its stderr is a log sink, drained into the
 server's own stderr with an `acp:` prefix; only its stdout is protocol. Chat
-frames ride `/events` under the `chat` event name; the routes that send
-messages are not built yet.
+frames ride `/events` under the `chat` event name, one JSON object per event:
+`{"type":"user","text"}`, `{"type":"chunk","text"}`,
+`{"type":"tool","id","title","status"}` (the same `id` twice means the same
+line, updated), `{"type":"done","stopReason","html"}` (`html` is the turn's
+agent text rendered as Markdown), `{"type":"error","message"}`,
+`{"type":"reset"}`. New keys may appear; existing ones keep their meaning.
 
 Routes:
 
@@ -277,6 +281,9 @@ Routes:
 | `GET /` | HTML page (Workflowy-style skin from `selfflowy/web/render.rkt`) |
 | `GET /today` | the first node titled with today's ISO date (the Daily day node), zoomed; terse empty state when there is none yet |
 | `GET /events` | `text/event-stream`, never ends. `event: outline` with the store revision as its data whenever a watched file reloaded, plus one at local midnight; `event: chat` with one JSON frame from the agent per line; `:hb` comment every 15s so proxies leave it alone |
+| `POST /chat` | prompt the agent; form field `text` (empty after trimming is `400`). `204` — what the panel draws comes back over `/events`, so every open tab stays in step. `409` with a terse `text/plain` body while a turn is running, `503` when the agent is gone |
+| `POST /chat/new` | new chat: the agent-side context goes away, `204`, and a `reset` frame clears every panel |
+| `POST /chat/cancel` | cancel the turn in flight, `204`; the `done` frame (`stopReason` `cancelled`) follows on its own |
 | `GET /api/tree` | byte-identical to `selfflowy tree` |
 | `GET /api/agenda` | byte-identical to `selfflowy agenda --json` |
 | `GET /static/*` | files under `selfflowy/web/static/` |
@@ -287,6 +294,13 @@ bare-ISO day nodes also keep a plain `#<anchor>` / `#<YYYY-MM-DD>` target, so
 links people wrote by hand still resolve.
 
 Paths that climb out of `static/` are 404, not files.
+
+The chat panel (a `>_ agent` button, bottom right; open state remembered in
+`localStorage`) is server-rendered from the bridge's transcript on every page
+load — frames are ephemeral, so a reload or a second tab replays instead of
+missing the conversation — and kept live by `static/chat.js` off the page's one
+SSE connection. Agent text is Markdown at render time, same as titles and
+notes; what you typed and a tool's title never are.
 
 **Edits are pushed, and picked up on the next request either way.** The server
 keeps a snapshot of the outlines (roots plus every `@include` fragment) and
