@@ -165,23 +165,48 @@
 
 ;; ---- the CLI ---------------------------------------------------------------
 
-;; `selfflowy serve` with SELFFLOWY_ACP_AGENT set to `agent` — or removed from
-;; the environment entirely when it is #f. -> (values exit-code stderr).
-(define (run-serve agent)
+;; `selfflowy serve ARGS` with SELFFLOWY_ACP_AGENT set to `agent` — or removed
+;; from the environment entirely when it is #f. -> (values sp stdout stderr).
+(define (start-serve agent args)
   (define env (environment-variables-copy (current-environment-variables)))
   (environment-variables-set! env #"SELFFLOWY_ACP_AGENT"
                               (and agent (string->bytes/utf-8 agent)))
   (define-values (sp stdout stdin stderr)
     (parameterize ([current-environment-variables env])
-      (subprocess #f #f #f (find-executable-path "racket")
-                  "-l" "selfflowy/cli" "--" "serve" (path->string example))))
+      (apply subprocess #f #f #f (find-executable-path "racket")
+             "-l" "selfflowy/cli" "--" "serve" args)))
   (close-output-port stdin)
-  (define out (port->string stdout))
+  (values sp stdout stderr))
+
+;; A serve that is expected to REFUSE: -> (values exit-code stderr).
+(define (run-serve agent [args (list (path->string example))])
+  (define-values (sp stdout stderr) (start-serve agent args))
+  (define _out (port->string stdout))
   (define err (port->string stderr))
   (close-input-port stdout)
   (close-input-port stderr)
   (subprocess-wait sp)
   (values (subprocess-status sp) err))
+
+;; A serve that is expected to COME UP: (proc port announcement). The port is
+;; read off the announcement line (--port 0 picks one), and the subprocess is
+;; taken down on the way out whether the body finished or not.
+(define (with-serve args proc)
+  (define-values (sp stdout stderr)
+    (start-serve fake-agent (append (list "--port" "0") args)))
+  (dynamic-wind
+   void
+   (λ ()
+     (define line (sync/timeout 60 (read-line-evt stdout 'any)))
+     (check-true (string? line) (format "serve said nothing: ~a" line))
+     (define m (regexp-match #rx"http://[^:]+:([0-9]+)" line))
+     (check-true (and m #t) (format "no url in ~s" line))
+     (proc (string->number (cadr m)) line))
+   (λ ()
+     (subprocess-kill sp #t)
+     (subprocess-wait sp)
+     (close-input-port stdout)
+     (close-input-port stderr))))
 
 (module+ test
   ;; ---- a whole turn --------------------------------------------------------
@@ -652,4 +677,66 @@
   (test-case "serve with a SELFFLOWY_ACP_AGENT that is not executable says so"
     (define-values (code err) (run-serve (path->string example)))
     (check-equal? code 1 err)
-    (check-true (string-contains? err "is not executable") err)))
+    (check-true (string-contains? err "is not executable") err))
+
+  ;; ---- serve DIR -----------------------------------------------------------
+  ;;
+  ;; The front door: a directory, globbed once at boot, top level only — and
+  ;; the directory itself is where the agent works, which is what the stored
+  ;; sessions hang off.
+
+  (test-case "serve DIR serves the directory's top-level outlines"
+    (define dir (make-temporary-file "sfdir~a" 'directory))
+    (dynamic-wind
+     void
+     (λ ()
+       (display-to-file "#lang selfflowy\nBuy milk\n" (build-path dir "Tasks.rkt"))
+       (display-to-file "#lang selfflowy\nShip it\n" (build-path dir "Roadmap.rkt"))
+       ;; a fragment lives one level down, and is not a root
+       (make-directory (build-path dir "Daily"))
+       (display-to-file "#lang selfflowy\nNot a root\n"
+                        (build-path dir "Daily" "2026-08.rkt"))
+       (with-serve
+        (list (path->string dir))
+        (λ (port line)
+          ;; the announcement names the directory the agent works in, and the
+          ;; roots it globbed — sorted, and only the top level
+          (check-true (string-contains? line (path->string dir)) line)
+          (check-true (< (caar (regexp-match-positions #rx"Roadmap[.]rkt" line))
+                         (caar (regexp-match-positions #rx"Tasks[.]rkt" line)))
+                      line)
+          (check-false (string-contains? line "Daily/2026-08.rkt") line)
+          (define-values (code body) (GET port "/"))
+          (check-equal? code 200 body)
+          (check-true (string-contains? body "Buy milk") body)
+          (check-true (string-contains? body "Ship it") body)
+          (check-false (string-contains? body "Not a root") body))))
+     (λ () (delete-directory/files dir))))
+
+  (test-case "serve with no arguments serves the working directory"
+    (define dir (make-temporary-file "sfcwd~a" 'directory))
+    (dynamic-wind
+     void
+     (λ ()
+       (display-to-file "#lang selfflowy\nFrom the cwd\n" (build-path dir "Tasks.rkt"))
+       (parameterize ([current-directory dir])
+         (with-serve '()
+                     (λ (port _line)
+                       (define-values (code body) (GET port "/"))
+                       (check-equal? code 200 body)
+                       (check-true (string-contains? body "From the cwd") body)))))
+     (λ () (delete-directory/files dir))))
+
+  (test-case "a directory with no outlines in it is refused, and names itself"
+    (define dir (make-temporary-file "sfempty~a" 'directory))
+    (dynamic-wind
+     void
+     (λ ()
+       ;; a fragment in a subdirectory is not a root, so this is still empty
+       (make-directory (build-path dir "Daily"))
+       (display-to-file "#lang selfflowy\nDeeper\n" (build-path dir "Daily" "2026-08.rkt"))
+       (define-values (code err) (run-serve fake-agent (list (path->string dir))))
+       (check-equal? code 3 err)
+       (check-true (string-contains? err (path->string dir)) err)
+       (check-true (string-contains? err "rkt") err))
+     (λ () (delete-directory/files dir)))))

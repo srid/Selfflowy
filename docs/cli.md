@@ -28,7 +28,8 @@ the kinds are how the layer below talks about failure.
   via `--file`, same default.
 - **Read commands** (`check` / `tree` / `agenda` / `calendar` / `ics` /
   `serve`) accept **one or more** outline paths. The justfile defaults to
-  `$SELFFLOWY_HOME/{Tasks,Daily,Roadmap}.rkt` (no `examples/` paths).
+  `$SELFFLOWY_HOME/*.rkt` (no `examples/` paths). `serve` also takes the
+  DIRECTORY and globs it itself — that is its front door, see below.
 - Personal data lives outside the repo. Override the directory with
   `SELFFLOWY_HOME`. Auto-commit (`add` / `done` / `move` / `daily`) only runs
   when the directory of the file actually written is a git work tree;
@@ -225,12 +226,33 @@ web deep-links). Multi-file merge like agenda.
 }
 ```
 
-## `serve [--port N] [--bind ADDR] [file ...]`
+## `serve [--port N] [--bind ADDR] [DIR | file ...]`
 
-Run the web view over the given outlines (default file set as above:
-`$SELFFLOWY_HOME/Tasks.rkt`; `just serve` passes the usual trio). Blocks
-until Ctrl-C, which shuts the listener down cleanly. One line on stdout at
-startup:
+Run the web view over an outline directory. Blocks until Ctrl-C, which shuts
+the listener down cleanly.
+
+**A DIRECTORY is the front door** — one argument that is a directory, or no
+argument at all, which means `$PWD`. The roots are that directory's `*.rkt` at
+the **top level only** (`@include` fragments live in subdirectories, so a
+recursive walk would load every one of them twice), sorted, so the node keys
+minted against the set are stable. The glob is evaluated once at startup: a new
+top-level file is picked up by restarting, not while running. A directory with
+no `*.rkt` in it is refused, naming the directory, exit 3. `just serve` is this
+form over `$SELFFLOWY_HOME`.
+
+The agent runs **in that directory** — exactly it, not the base derived from
+the files. That is the point of the form: Claude Code keys its stored sessions
+by the directory it was started in, so a stable one is what makes "the session
+you were last in" a thing that survives a restart (see *Sessions* below).
+
+```console
+$ selfflowy serve ~/Dropbox/Selfflowy-Srid
+selfflowy serve http://127.0.0.1:8080 dir: /home/me/Dropbox/Selfflowy-Srid files: /.../Daily.rkt /.../Tasks.rkt
+```
+
+**Explicit `.rkt` files are the plumbing** — the roots are those files, and the
+agent works from the directory they hang off (one file: its directory; several:
+the deepest directory holding all of them, the base keys are minted against).
 
 ```console
 $ selfflowy serve examples/Example.rkt
@@ -375,7 +397,7 @@ a version: compare it, do not parse it.
 
 Exit codes: 0 on clean shutdown, 1 on bad flags, a port it cannot bind, or a
 missing / unusable `SELFFLOWY_ACP_AGENT`; 3 when an outline path does not
-exist.
+exist, or a directory holds no top-level `*.rkt`.
 
 There is no static HTML export — `curl http://127.0.0.1:8080/ > snap.html`
 if you want one.

@@ -122,12 +122,16 @@ nix develop        # racket 9.2 + just; or install them yourself
 just install       # gregor + markdown, then --link selfflowy/
 just check         # validates $SELFFLOWY_HOME/*.rkt
 just tree examples/Example.rkt   # JSON forest for agents
-just serve                       # web view on http://127.0.0.1:8080
+just serve                       # $SELFFLOWY_HOME on http://127.0.0.1:8080
 just agenda
 just calendar --month 2026-08
 just daily                       # today's node in Daily/YYYY-MM.rkt
 just test
 ```
+
+`selfflowy serve DIR` serves `DIR/*.rkt` and runs the agent in `DIR`
+(default: `$PWD`; `just serve` passes `$SELFFLOWY_HOME`). Naming files
+instead still works — see docs/cli.md.
 
 `serve` refuses to start without `SELFFLOWY_ACP_AGENT` — the path to an
 executable speaking the Agent Client Protocol. `nix develop` (hence `just

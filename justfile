@@ -74,19 +74,14 @@ move *args: install
 daily *args: install
     selfflowy daily {{args}}
 
-# SELFFLOWY_ACP_AGENT comes from the nix dev shell; serve will not start
-# without it, so export it yourself outside `nix develop`.
-# Serve the web view (default: Dropbox outlines on 127.0.0.1:8080)
+# serve takes the DIRECTORY, not the glob: it globs the top level itself, and
+# the agent then works in $SELFFLOWY_HOME (which is what makes its stored
+# sessions survive a restart). SELFFLOWY_ACP_AGENT comes from the nix dev
+# shell; serve will not start without it, so export it yourself outside
+# `nix develop`.
+# Serve the web view (default: $SELFFLOWY_HOME on 127.0.0.1:8080)
 serve *args: install
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ -z "{{args}}" ]; then
-      selfflowy serve {{default_outlines}}
-    elif [[ "{{args}}" != *".rkt"* ]]; then
-      selfflowy serve {{args}} {{default_outlines}}
-    else
-      selfflowy serve {{args}}
-    fi
+    selfflowy serve {{if args == "" { selfflowy_home } else { args }}}
 
 # The server is how you run selfflowy; it reloads an outline when it changes.
 alias run := serve

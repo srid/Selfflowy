@@ -347,24 +347,28 @@
 ;;
 ;; #:acp-command is the agent `serve` chats with — #f means there is none, and
 ;; the CLI never passes #f (it refuses to start without one; see docs/cli.md).
+;; #:agent-cwd is the directory it works in; #f means the outlines' own.
 ;; #:on-agent is handed the bridge once it exists: the seam for tests, and for
 ;; anything that wants to prompt the agent without an HTTP request.
 (define (start-server #:port [port 8080]
                       #:bind [bind "127.0.0.1"]
                       #:files files
                       #:acp-command [acp-command #f]
+                      #:agent-cwd [agent-cwd #f]
                       #:on-listen [on-listen void]
                       #:on-agent [on-agent void])
   (define st (make-store files))
   (define hub (make-hub))
-  ;; The agent's working directory is the outlines' own: one file means its
-  ;; directory, several mean the deepest one that holds them all (the same
-  ;; base node keys are minted against). Nothing is spawned here — the bridge
-  ;; starts a subprocess on the first prompt.
+  ;; The agent's working directory: the one it was given, else the outlines'
+  ;; own — one file means its directory, several mean the deepest one that
+  ;; holds them all (the same base node keys are minted against). It is worth
+  ;; naming rather than deriving: an agent's stored sessions are keyed by it,
+  ;; so a cwd that moves when the file set moves is a conversation history that
+  ;; moves with it. Nothing is spawned here; construction stays cheap.
   (define agent
     (and acp-command
          (make-acp-agent #:command acp-command
-                         #:cwd (roots-base files)
+                         #:cwd (or agent-cwd (roots-base files))
                          #:broadcast (λ (name data) (hub-broadcast! hub name data)))))
   (define confirm (make-async-channel 1))
   (define stop
