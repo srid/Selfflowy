@@ -46,9 +46,10 @@ Read README.md and docs/*.md first. This file is only what you can't infer.
 * Node keys are minted in the load layer, not the expander (see docs/cli.md);
   store.rkt owns snapshots and binds mirror sites before anything draws them.
 * Live view: store (what) -> web/watch.rkt (when) -> web/events.rkt (generic
-  SSE hub); they meet only in serve.rkt.
-* web/acp.rkt is the ACP bridge: one subprocess, one turn at a time, chat
-  frames through the same hub. Nothing else spells ACP.
+  SSE hub); they meet only in serve.rkt, and the chat rides the same hub.
+* selfflowy/acp.rkt speaks ACP: one subprocess, typed events out of one
+  handler, no web/. web/chat.rkt makes those events a conversation — one turn
+  at a time, chat frames, transcript. Nothing else spells either.
 * Core must build without web/: file naming is selfflowy/paths (file-label,
   key-label), not a renderer helper.
 * JSON is two modules, two version counters: json/model (what a node/tree IS,
