@@ -323,6 +323,16 @@
             fi
             grep -q SELFFLOWY_ACP_AGENT refused.err
 
+            # Nothing to serve, no server: the DIRECTORY form globs the top
+            # level, and an empty one is refused before anything binds.
+            mkdir -p empty-outlines
+            if selfflowy serve --port 8097 empty-outlines \
+                 > refused-dir.out 2> refused-dir.err; then
+              echo "smoke: serve started on a directory with no outlines" >&2
+              exit 1
+            fi
+            grep -q empty-outlines refused-dir.err
+
             # Wait for a FRAMING line in a file curl is still writing. Framing
             # only — a JSON payload goes to racket below, never to grep.
             wait_for() {
