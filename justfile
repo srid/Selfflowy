@@ -72,6 +72,8 @@ move *args: install
 daily *args: install
     selfflowy daily {{args}}
 
+# SELFFLOWY_ACP_AGENT comes from the nix dev shell; serve will not start
+# without it, so export it yourself outside `nix develop`.
 # Serve the web view (default: Dropbox outlines on 127.0.0.1:8080)
 serve *args: install
     #!/usr/bin/env bash

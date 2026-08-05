@@ -274,16 +274,22 @@ line, updated), `{"type":"done","stopReason","html"}` (`html` is the turn's
 agent text rendered as Markdown), `{"type":"error","message"}`,
 `{"type":"reset"}`. New keys may appear; existing ones keep their meaning.
 
+A turn is accepted (and its `user` frame pushed) before the subprocess exists,
+so a cancel can arrive during the handshake. It is remembered and sent as soon
+as the prompt is on the wire: every cancelled turn ends the same way, a `done`
+frame whose `stopReason` the agent chose (`cancelled` from a Claude Code
+adapter).
+
 Routes:
 
 | Route | Body |
 |-------|------|
 | `GET /` | HTML page (Workflowy-style skin from `selfflowy/web/render.rkt`) |
 | `GET /today` | the first node titled with today's ISO date (the Daily day node), zoomed; terse empty state when there is none yet |
-| `GET /events` | `text/event-stream`, never ends. `event: outline` with the store revision as its data whenever a watched file reloaded, plus one at local midnight; `event: chat` with one JSON frame from the agent per line; `:hb` comment every 15s so proxies leave it alone |
+| `GET /events` | `text/event-stream`, never ends. `event: outline` with the store revision as its data whenever a watched file reloaded, plus one at local midnight; `event: chat` with one JSON frame from the agent per line; a `:hb` comment on connect and every 15s after, so a client knows it is subscribed and proxies leave it alone |
 | `POST /chat` | prompt the agent; form field `text` (empty after trimming is `400`). `204` — what the panel draws comes back over `/events`, so every open tab stays in step. `409` with a terse `text/plain` body while a turn is running, `503` when the agent is gone |
 | `POST /chat/new` | new chat: the agent-side context goes away, `204`, and a `reset` frame clears every panel |
-| `POST /chat/cancel` | cancel the turn in flight, `204`; the `done` frame (`stopReason` `cancelled`) follows on its own |
+| `POST /chat/cancel` | cancel the turn in flight, `204` (also while the agent is still booting); the `done` frame (`stopReason` `cancelled`) follows on its own |
 | `GET /api/tree` | byte-identical to `selfflowy tree` |
 | `GET /api/agenda` | byte-identical to `selfflowy agenda --json` |
 | `GET /static/*` | files under `selfflowy/web/static/` |

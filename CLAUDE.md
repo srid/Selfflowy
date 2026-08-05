@@ -45,6 +45,12 @@ Read README.md and docs/*.md first. This file is only what you can't infer.
   map kind -> exit code. The web mutation routes will call the same ops.
 * Node keys are minted in the load layer, not the expander (see docs/cli.md);
   store.rkt owns snapshots and binds mirror sites before anything draws them.
+* Live view is three parts in web/, none of which knows the others: store
+  (what the outlines ARE), watch.rkt (WHEN they moved), events.rkt (a generic
+  SSE hub: event names + payload strings, no outline vocabulary). serve.rkt is
+  the only place they meet.
+* The ACP bridge is web/acp.rkt: one subprocess, one turn at a time, chat
+  frames out through that same hub. Nothing else spells "session/prompt".
 * Core must build without web/: file naming is selfflowy/paths (file-label,
   key-label), not a renderer helper.
 * JSON is two modules, two version counters: json/model (what a node/tree IS,
@@ -55,9 +61,12 @@ Read README.md and docs/*.md first. This file is only what you can't infer.
 * just check / tree / agenda / serve / test — recipes handle PLTUSERHOME +
   raco link (`run`/`watch` alias `serve`). Racket comes from the nix dev
   shell (nixpkgs 9.2). Don't fight raco setup; PLTUSERHOME must be writable.
-* Small commits, one concern each. Push as you go.
+* Branch and PR for EVERY change, agents included: work on a branch, small
+  commits one concern each, open a PR against master, CI green before it
+  merges. Never push to master directly — branch protection refuses it.
 * Other agents work this repo concurrently (Grok in a kolu terminal). git pull
-  --rebase before starting; don't assume a clean tree is yours.
+  --rebase before starting, and rebase the branch on master before the PR;
+  don't assume a clean tree is yours.
 * Driving that terminal: `padi-tui status` lists terminals + agent state;
   `padi-tui wait <id> --until awaiting,waiting` blocks until its turn ends.
   `kaval-tui snapshot <id>` reads the screen; to prompt it: `kaval-tui send
