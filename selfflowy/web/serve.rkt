@@ -17,7 +17,9 @@
 ;;
 ;; Live updates are three parts that only meet here: the store knows WHAT the
 ;; outlines are, the watcher knows WHEN they moved, the hub knows WHO is
-;; listening. None of them knows about the other two.
+;; listening. None of them knows about the other two. The ACP bridge is a
+;; fourth of the same kind — it pushes `chat` through the same hub and has
+;; never heard of HTTP; the routes that drive it are the next work package.
 
 (require racket/async-channel
          racket/path
@@ -40,8 +42,9 @@
          selfflowy/json/model
          selfflowy/json/reply
          selfflowy/load
-         (only-in selfflowy/paths file-label)
+         (only-in selfflowy/paths file-label roots-base)
          selfflowy/store
+         selfflowy/web/acp
          selfflowy/web/events
          selfflowy/web/render
          selfflowy/web/watch)
@@ -245,12 +248,28 @@
 
 ;; Returns a stop procedure. #:on-listen gets the port actually bound (useful
 ;; when #:port is 0, i.e. "pick one").
+;;
+;; #:acp-command is the agent `serve` chats with — #f means there is none, and
+;; the CLI never passes #f (it refuses to start without one; see docs/cli.md).
+;; #:on-agent is handed the bridge once it exists: the seam for tests, and for
+;; anything that wants to prompt the agent without an HTTP request.
 (define (start-server #:port [port 8080]
                       #:bind [bind "127.0.0.1"]
                       #:files files
-                      #:on-listen [on-listen void])
+                      #:acp-command [acp-command #f]
+                      #:on-listen [on-listen void]
+                      #:on-agent [on-agent void])
   (define st (make-store files))
   (define hub (make-hub))
+  ;; The agent's working directory is the outlines' own: one file means its
+  ;; directory, several mean the deepest one that holds them all (the same
+  ;; base node keys are minted against). Nothing is spawned here — the bridge
+  ;; starts a subprocess on the first prompt.
+  (define agent
+    (and acp-command
+         (make-acp-agent #:command acp-command
+                         #:cwd (roots-base files)
+                         #:broadcast (λ (name data) (hub-broadcast! hub name data)))))
   (define confirm (make-async-channel 1))
   (define stop
     (serve #:dispatch (make-dispatcher st hub)
@@ -272,7 +291,9 @@
                    #:on-change
                    (λ () (hub-broadcast! hub "outline"
                                          (number->string (store-revision st))))))
+  (when agent (on-agent agent))
   (on-listen bound)
   (λ ()
     (stop-watcher)
+    (when agent (agent-stop! agent))
     (stop)))

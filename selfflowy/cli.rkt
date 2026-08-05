@@ -21,6 +21,7 @@
          selfflowy/dates
          selfflowy/load
          selfflowy/ops
+         (only-in selfflowy/web/acp acp-command-problem)
          selfflowy/web/serve)
 (define exit-ok 0)
 (define exit-usage 1)
@@ -345,9 +346,27 @@
     [else
      (display ics)]))
 
+;; The agent `serve` chats with. No fallback and no PATH lookup: an agent the
+;; server picked for you is an agent you did not choose, and a serve command
+;; that silently has no chat panel is worse than one that will not start. Nix
+;; sets the variable (`nix run`, the dev shell, hence `just serve`).
+(define (acp-command-or-die)
+  (define v (getenv "SELFFLOWY_ACP_AGENT"))
+  (unless (and v (non-empty-string? v))
+    (die exit-usage
+         "SELFFLOWY_ACP_AGENT is not set; serve needs the path to an ACP agent (docs/cli.md)"
+         #:json? #f))
+  (define problem (acp-command-problem v))
+  (when problem
+    (die exit-usage
+         (format "SELFFLOWY_ACP_AGENT ~a: ~a" problem v)
+         #:json? #f))
+  v)
+
 ;; Blocks until Ctrl-C. No auth: the network is the auth (put it behind
 ;; Tailscale or Caddy). A custodian shutdown drops listeners and connections.
 (define (cmd-serve paths port bind)
+  (define acp-command (acp-command-or-die))
   (define cust (make-custodian))
   (define stop
     (parameterize ([current-custodian cust])
@@ -358,6 +377,7 @@
          #:port port
          #:bind bind
          #:files paths
+         #:acp-command acp-command
          #:on-listen
          (λ (bound)
            (printf "selfflowy serve http://~a:~a files: ~a\n"

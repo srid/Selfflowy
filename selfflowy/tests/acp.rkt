@@ -9,11 +9,15 @@
 
 (require rackunit
          json
+         net/http-client
          racket/async-channel
+         racket/file
          racket/list
+         racket/port
          racket/string
          selfflowy/ops
-         selfflowy/web/acp)
+         selfflowy/web/acp
+         selfflowy/web/serve)
 
 (define fake-agent
   (path->string (collection-file-path "fake-acp-agent.rkt" "selfflowy" "tests")))
@@ -65,6 +69,74 @@
       [(not (agent-busy? ag)) #t]
       [(>= (current-inexact-milliseconds) deadline) #f]
       [else (sleep 0.02) (loop)])))
+
+;; ---- a server with an agent in it ------------------------------------------
+
+(define outline
+  (string-append "#lang selfflowy\n" "Inbox\n" "  Buy milk\n"))
+
+;; Boots the real server with the fake agent wired in: (proc port agent).
+(define (with-server proc)
+  (define dir (make-temporary-file "sfacp~a" 'directory))
+  (define f (build-path dir "Tasks.rkt"))
+  (display-to-file outline f #:exists 'truncate)
+  (define bound #f)
+  (define agent #f)
+  (define stop
+    (start-server #:port 0
+                  #:bind "127.0.0.1"
+                  #:files (list f)
+                  #:acp-command fake-agent
+                  #:on-listen (λ (p) (set! bound p))
+                  #:on-agent (λ (a) (set! agent a))))
+  (dynamic-wind
+   void
+   (λ () (proc bound agent))
+   (λ ()
+     (stop)
+     (delete-directory/files dir))))
+
+;; /events never ends, so this keeps the port. Same shape as tests/serve.rkt.
+(define (open-events port)
+  (define-values (_status _headers in)
+    (http-sendrecv "127.0.0.1" "/events" #:port port #:method #"GET"))
+  in)
+
+;; Next real event on the stream: -> (cons name data) | #f. Heartbeats are
+;; framing, not news.
+(define (next-event in #:timeout [timeout 30])
+  (define deadline (+ (current-inexact-milliseconds) (* 1000.0 timeout)))
+  (let loop ([name #f] [data '()])
+    (define left (/ (- deadline (current-inexact-milliseconds)) 1000.0))
+    (define line (and (positive? left)
+                      (sync/timeout left (read-line-evt in 'linefeed))))
+    (cond
+      [(or (not line) (eof-object? line)) #f]
+      [(string=? line "")
+       (if name (cons name (string-join (reverse data) "\n")) (loop #f '()))]
+      [(string-prefix? line "event: ") (loop (substring line 7) data)]
+      [(string-prefix? line "data: ") (loop name (cons (substring line 6) data))]
+      [else (loop name data)])))
+
+;; ---- the CLI ---------------------------------------------------------------
+
+;; `selfflowy serve` with SELFFLOWY_ACP_AGENT set to `agent` — or removed from
+;; the environment entirely when it is #f. -> (values exit-code stderr).
+(define (run-serve agent)
+  (define env (environment-variables-copy (current-environment-variables)))
+  (environment-variables-set! env #"SELFFLOWY_ACP_AGENT"
+                              (and agent (string->bytes/utf-8 agent)))
+  (define-values (sp stdout stdin stderr)
+    (parameterize ([current-environment-variables env])
+      (subprocess #f #f #f (find-executable-path "racket")
+                  "-l" "selfflowy/cli" "--" "serve" (path->string example))))
+  (close-output-port stdin)
+  (define out (port->string stdout))
+  (define err (port->string stderr))
+  (close-input-port stdout)
+  (close-input-port stderr)
+  (subprocess-wait sp)
+  (values (subprocess-status sp) err))
 
 (module+ test
   ;; ---- a whole turn --------------------------------------------------------
@@ -223,4 +295,48 @@
     (check-exn exn:fail?
                (λ () (make-acp-agent #:command "/nonexistent/acp-agent"
                                      #:cwd (find-system-path 'temp-dir)
-                                     #:broadcast void)))))
+                                     #:broadcast void))))
+
+  ;; ---- wired into the server ------------------------------------------------
+
+  ;; The acceptance test for the package: a browser sitting on /events sees the
+  ;; agent talk, through the same hub the outline events use.
+  (test-case "chat frames reach a real /events connection"
+    (with-server
+     (λ (port agent)
+       (check-pred acp-agent? agent)
+       (define in (open-events port))
+       (agent-prompt! agent "hello there")
+       (define first-ev (next-event in))
+       (check-not-false first-ev "no chat event within the timeout")
+       (check-equal? (car first-ev) "chat")
+       (define js (string->jsexpr (cdr first-ev)))
+       (check-equal? (hash-ref js 'type) "user")
+       (check-equal? (hash-ref js 'text) "hello there")
+       ;; the rest of the turn arrives on the same stream
+       (let loop ([n 0])
+         (define ev (next-event in))
+         (check-not-false ev "the turn did not finish on the stream")
+         (define j (string->jsexpr (cdr ev)))
+         (unless (or (equal? (hash-ref j 'type) "done") (> n 20))
+           (loop (add1 n))))
+       (close-input-port in))))
+
+  ;; ---- the CLI contract ----------------------------------------------------
+
+  (test-case "serve with no SELFFLOWY_ACP_AGENT is a usage error naming it"
+    (define-values (code err) (run-serve #f))
+    (check-equal? code 1 err)
+    (check-true (string-contains? err "SELFFLOWY_ACP_AGENT") err)
+    (check-true (string-contains? err "not set") err))
+
+  (test-case "serve with a SELFFLOWY_ACP_AGENT that is not there says which"
+    (define-values (code err) (run-serve "/nonexistent/acp-agent"))
+    (check-equal? code 1 err)
+    (check-true (string-contains? err "SELFFLOWY_ACP_AGENT") err)
+    (check-true (string-contains? err "/nonexistent/acp-agent") err))
+
+  (test-case "serve with a SELFFLOWY_ACP_AGENT that is not executable says so"
+    (define-values (code err) (run-serve (path->string example)))
+    (check-equal? code 1 err)
+    (check-true (string-contains? err "is not executable") err)))

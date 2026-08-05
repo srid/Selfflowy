@@ -305,6 +305,15 @@
             # and the language readers resolve differently there.
             cp ${./examples/Example.rkt} live.rkt
             chmod u+w live.rkt
+
+            # `serve` refuses to start without an ACP agent. The scripted one
+            # from the test suite is agent enough here: the bridge spawns a
+            # subprocess on the first prompt, and nothing below prompts it.
+            printf '#!/bin/sh\nexec racket %s "$@"\n' \
+              ${./selfflowy/tests/fake-acp-agent.rkt} > fake-acp-agent
+            chmod +x fake-acp-agent
+            export SELFFLOWY_ACP_AGENT="$PWD/fake-acp-agent"
+
             selfflowy serve --port 8099 live.rkt &
             for i in $(seq 1 60); do
               curl -sf -o page.html http://127.0.0.1:8099/ && break
