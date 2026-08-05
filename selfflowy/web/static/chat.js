@@ -94,6 +94,8 @@
   var commands=[],matches=[],picked=-1;
 
   // Two strings per command, and only what has a name: this list is drawn.
+  // An empty one takes the commands button away with it — a button that opens
+  // nothing is a button that lies.
   function setCommands(list){
     commands=[];
     for(var i=0;list&&i<list.length;i++){
@@ -102,6 +104,7 @@
         commands.push({name:c.name,
                        description:typeof c.description==='string'?c.description:''});
     }
+    panel.classList.toggle('has-commands',commands.length>0);
   }
 
   function popOpen(){return !!pop&&!pop.hidden}
@@ -268,7 +271,7 @@
     if(body)body.scrollTop=body.scrollHeight;
 
     document.addEventListener('click',function(e){
-      var t=e.target.closest('[data-post],[data-chat-toggle]');
+      var t=e.target.closest('[data-post],[data-chat-toggle],[data-chat-commands]');
       // a click anywhere but the popover's own surface (or the input it
       // completes) puts it away
       if(!t&&!(pop&&pop.contains(e.target))&&e.target!==input)closePop();
@@ -280,6 +283,13 @@
         setOpen(o);
         // a panel that just opened has one thing to do, and it is type
         if(o)input.focus();
+        return;
+      }
+      // The whole list, and pressing it again puts it away. Same popover, so
+      // the arrows and Enter work from here on exactly as if it were typed.
+      if(t.hasAttribute('data-chat-commands')){
+        if(popOpen())closePop();
+        else{redraw();input.focus()}
         return;
       }
       post(t.getAttribute('data-post'));

@@ -783,6 +783,15 @@ body.sf-body:has(.sf-chat.is-open) .sf-main {
 /* the keyboard's highlight and the mouse's are the same mark */
 .sf-chat-cmd.is-picked, .sf-chat-cmd:hover { background: var(--pill-bg); }
 
+/* The button that opens the same popover, for someone who has not learned the
+   slash. It appears only once there is a list to show — and while a turn runs
+   there is still just the one thing to do, and it is stop. */
+.sf-chat-cmds { display: none; }
+
+.sf-chat.has-commands .sf-chat-cmds { display: inline-block; }
+
+.sf-chat.is-busy .sf-chat-cmds { display: none; }
+
 .sf-chat-input {
   flex: 1 1 auto;
   min-width: 0;

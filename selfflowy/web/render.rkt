@@ -608,7 +608,12 @@
         ;; them at init so a reloaded page completes immediately, and a
         ;; `commands` frame replaces them from there. JSON in an attribute —
         ;; the xexpr layer is what escapes it, same as any other string here.
-        (aside ((class ,(classes "sf-chat" (and busy? "is-busy"))) (id "sf-chat")
+        (aside ((class ,(classes "sf-chat" (and busy? "is-busy")
+                                 ;; nothing to offer, nothing to press: the
+                                 ;; commands button is a class away (app.css),
+                                 ;; so a `commands` frame can bring it back
+                                 (and (pair? commands) "has-commands")))
+                (id "sf-chat")
                 (data-commands ,(jsexpr->string commands)))
                (div ((class "sf-chat-head"))
                     ;; Which model, when the bridge has heard one — never a
@@ -638,6 +643,12 @@
                     ,@(for/list ([e (in-list transcript)]) (chat-entry-xexpr e)))
                (form ((class "sf-chat-form") (id "sf-chat-form")
                       (action ,send-href) (method "post"))
+                     ;; The same popover a typed "/" opens, unfiltered: the
+                     ;; commands are a thing to SEE, not only to guess at.
+                     (button ((type "button") (class "sf-chat-btn sf-chat-cmds")
+                              (data-chat-commands "") (title "commands")
+                              (aria-label "show the agent's commands"))
+                             "/")
                      (input ((class "sf-chat-input") (name "text") (type "text")
                              (autocomplete "off") (placeholder "message the agent")
                              ,@(if busy? '((disabled "disabled")) '())))

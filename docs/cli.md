@@ -328,7 +328,8 @@ SSE connection. Its header names the model when the agent has reported one.
 Agent text is Markdown at render time, same as titles and notes; what you typed
 and a tool's title never are.
 
-Typing `/` in the panel's input opens a completion popover over the agent's
+Typing `/` in the panel's input — or pressing the `/` button on the input row,
+which shows the whole list — opens a completion popover over the agent's
 slash commands (replayed onto the panel as `data-commands`, kept live by the
 `commands` frame): ↑/↓ move, Enter or Tab accept the highlighted one into the
 input, Esc closes, and Enter with nothing open sends the message as always.

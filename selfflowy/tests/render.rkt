@@ -555,9 +555,13 @@
                         (hasheq 'name "quote\"me" 'description "<b>not html</b>")))
     ;; the attribute is escaped, so nothing in it can end the tag
     (check-false (string-contains? s "<b>not html</b>") s)
+    ;; a list to show is what puts the commands button on the input row
+    (check-true (string-contains? s "sf-chat has-commands") s)
+    (check-true (string-contains? s "data-chat-commands") s)
     (define bare (panel '()))
     (check-equal? (panel-commands bare) '())
-    (check-true (string-contains? bare "data-commands=\"[]\"") bare))
+    (check-true (string-contains? bare "data-commands=\"[]\"") bare)
+    (check-false (string-contains? bare "has-commands") bare))
 
   (test-case "the chat script stays tiny, framework-free and connection-free"
     (define js (file->string (build-path (web-static-dir) "chat.js")))
