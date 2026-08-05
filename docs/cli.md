@@ -277,12 +277,28 @@ agent text rendered as Markdown), `{"type":"error","message"}`,
 existing ones keep their meaning.
 
 The `model` frame is which model the session is running, and it is the agent's
-word for it — the adapter reports the model as a session **config option**
-(`configOptions`, the entry with id `model`), once in the `session/new` result
-and again in a `config_option_update` whenever it changes under a live session.
-The bridge reads it from both, remembers it, and pushes a frame only when the
-name actually moved. An agent that never says leaves the header alone; nothing
-is inferred from a command line or a version.
+word for it — said two ways, because one is not enough. The adapter reports the
+**picked** model as a session config option (`configOptions`, the entry with id
+`model`), once in the `session/new` result and again in a
+`config_option_update` whenever it changes under a live session. But a `/model`
+slash command is handled inside the wrapped Claude Code CLI: the adapter never
+sees it as a config change, so `configOptions` go on naming the model the
+session started on. The **running** model is in the CLI's own `system`/`init`
+message, which the adapter forwards verbatim as a `_claude/sdkMessage`
+notification — to a client that asked, for the kinds it asked for, which is why
+`session/new` carries
+`_meta.claudeCode.emitRawSDKMessages = [{"type":"system","subtype":"init"}]`.
+Only the `model` field of it is read.
+
+Whichever source moved last wins, and each is debounced against its own
+previous value: the picker resends its whole set whenever anything in it moves,
+and the running model repeats every turn. The first running model is a baseline
+(it agrees with the config option) and is not announced twice. A running model
+the picker offers is labelled with the picker's name; one it does not offer is
+shown raw and named once in the log — truthful, where a guess would not be. An
+agent that never says leaves the header alone; nothing is inferred from a
+command line or a version, and an agent that is not the Claude Code adapter
+ignores the `_meta` and loses nothing.
 
 The `commands` frame is the agent's slash commands — the adapter pushes the
 whole list as an `available_commands_update` (`availableCommands`, each entry
