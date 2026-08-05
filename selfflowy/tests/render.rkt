@@ -4,6 +4,7 @@
 ;; `today` is always passed in.
 
 (require rackunit
+         json
          racket/file
          racket/string
          xml
@@ -386,6 +387,7 @@
     (check-true (string-contains? s "src=\"/static/htmx.min.js\"") s)
     (check-true (string-contains? s "src=\"/static/sse.js\"") s)
     (check-true (string-contains? s "src=\"/static/collapse.js\"") s)
+    (check-true (string-contains? s "src=\"/static/chat.js\"") s)
     (check-false (string-contains? s "tailwind") s)
     (check-false (string-contains? s "cdn.") s)
     (check-true (string-contains? s "<aside class=\"sf-sidebar\"") s)
@@ -420,6 +422,103 @@
     (check-false (string-contains? js "require") js)
     (check-true (string-contains? js "selfflowy.collapsed") js)
     (check-true (string-contains? js "localStorage") js))
+
+  ;; ---- chat panel ----------------------------------------------------------
+  ;;
+  ;; The panel is rendered from the bridge's transcript (jsexprs; see
+  ;; tests/acp.rkt for the real ones). Hand-built here so the drawing is the
+  ;; only thing under test.
+
+  (define (turn text agent
+                #:tools [tools '()] #:status [status "done"]
+                #:stop [stop "end_turn"] #:error [err (json-null)])
+    (hash 'type "turn" 'text text 'agent agent 'tools tools
+          'status status 'stopReason stop 'error err))
+
+  (define (panel transcript)
+    (xstr (render-chat-panel transcript
+                             #:send-href "/chat"
+                             #:new-href "/chat/new"
+                             #:cancel-href "/chat/cancel"
+                             #:event "chat")))
+
+  (test-case "an empty panel is a form, a sink and the routes it was told"
+    (define s (panel '()))
+    (check-true (string-contains? s "id=\"sf-chat\"") s)
+    (check-true (string-contains? s "action=\"/chat\"") s)
+    (check-true (string-contains? s "data-post=\"/chat/new\"") s)
+    (check-true (string-contains? s "data-post=\"/chat/cancel\"") s)
+    ;; frames arrive on the page's own connection, under the name it is given
+    (check-true (string-contains? s "sse-swap=\"chat\"") s)
+    (check-false (string-contains? s "sse-connect") s)
+    ;; idle: the input is live and there is nothing to stop
+    (check-false (string-contains? s "is-busy") s)
+    (check-false (string-contains? s "disabled") s))
+
+  (test-case "a finished turn replays: user text verbatim, agent text Markdown"
+    (define s (panel (list (turn "do **not** bold me" "and **this** is bold"
+                                 #:tools (list (hash 'id "call-1"
+                                                     'title "read Tasks.rkt"
+                                                     'status "completed"))))))
+    ;; what the user typed is a string, not a document
+    (check-true (string-contains? s "do **not** bold me") s)
+    ;; what the agent said gets the same treatment a note gets
+    (check-true (string-contains? s "<strong>this</strong>") s)
+    (check-true (string-contains? s "data-tool-id=\"call-1\"") s)
+    (check-true (string-contains? s "data-status=\"completed\"") s)
+    (check-true (string-contains? s "✓") s)
+    ;; end_turn is the ordinary ending: it says nothing
+    (check-false (string-contains? s "sf-chat-note") s))
+
+  (test-case "a running turn comes up busy, with its text still verbatim"
+    (define s (panel (list (turn "go" "half a **sent"
+                                 #:status "running" #:stop (json-null)))))
+    (check-true (string-contains? s "sf-chat is-busy") s)
+    (check-true (string-contains? s "disabled=\"disabled\"") s)
+    ;; mid-stream text is a fragment; Markdown waits for the done frame
+    (check-true (string-contains? s "half a **sent") s)
+    (check-false (string-contains? s "<strong") s))
+
+  (test-case "a failed turn keeps its error, and an odd ending says which"
+    (define s (panel (list (turn "go" "" #:status "error" #:stop (json-null)
+                                 #:error "the agent exited (code 1)")
+                           (turn "again" "" #:stop "cancelled"))))
+    (check-true (string-contains? s "the agent exited (code 1)") s)
+    (check-true (string-contains? s "sf-chat-msg is-error") s)
+    (check-true (string-contains? s "cancelled") s))
+
+  (test-case "markers draw a break in the conversation, not a turn"
+    (define s (panel (list (hash 'type "reset" 'message (json-null))
+                           (hash 'type "restart" 'message "the agent exited"))))
+    (check-true (string-contains? s "sf-chat-sep") s)
+    (check-true (string-contains? s "new chat") s)
+    (check-true (string-contains? s "the agent exited") s)
+    (check-false (string-contains? s "sf-chat-turn") s))
+
+  ;; User text and tool titles are never Markdown and never HTML. The xexpr
+  ;; is what guarantees it, so this is the test that says so.
+  (test-case "script payloads land as text, in messages and tool titles alike"
+    (define s (panel (list (turn "<script>alert(1)</script>" "<b>no</b>"
+                                 #:tools (list (hash 'id "c<1"
+                                                     'title "rm -rf <script>"
+                                                     'status "failed"))))))
+    (check-false (string-contains? s "<script>") s)
+    (check-true (string-contains? s "&lt;script&gt;alert(1)&lt;/script&gt;") s)
+    ;; the agent's Markdown is sanitized by the markdown module, raw HTML and all
+    (check-false (regexp-match? #rx"<b[ >]" s) s)
+    (check-true (string-contains? s "data-tool-id=\"c&lt;1\"") s)
+    (check-true (string-contains? s "✗") s))
+
+  (test-case "the chat script stays tiny, framework-free and connection-free"
+    (define js (file->string (build-path (web-static-dir) "chat.js")))
+    (check-false (string-contains? js "require") js)
+    ;; ONE connection per page: the panel hooks the htmx sse extension's
+    ;; messages instead of opening a second EventSource
+    (check-false (string-contains? js "new EventSource") js)
+    (check-true (string-contains? js "htmx:sseBeforeMessage") js)
+    (check-true (string-contains? js "selfflowy.chat") js)
+    ;; chunk and user text are inserted as TEXT
+    (check-true (string-contains? js "textContent") js))
 
   ;; ---- file sections (the watcher's re-render unit) ------------------------
 

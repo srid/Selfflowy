@@ -196,6 +196,24 @@
          (check-equal? code 404 (format "~a -> ~a" p body))
          (check-false (string-contains? body "#lang") body)))))
 
+  ;; This server has no agent (the CLI refuses to start one that way; see
+  ;; tests/acp.rkt for the wired-up chat routes). Everything chat says so
+  ;; rather than pretending: no panel on the page, 503 on the routes.
+  (test-case "without an agent there is no panel, and the chat routes are 503"
+    (with-server
+     (λ (port f)
+       (define-values (_c _h body) (GET port "/"))
+       (check-false (string-contains? body "sf-chat-body") body)
+       (define-values (status _headers in)
+         (http-sendrecv "127.0.0.1" "/chat" #:port port #:method #"POST"
+                        #:headers (list #"Content-Type: application/x-www-form-urlencoded")
+                        #:data "text=hello"))
+       (define reply (port->string in))
+       (close-input-port in)
+       (check-equal? (string->number (cadr (string-split (bytes->string/utf-8 status) " ")))
+                     503
+                     reply))))
+
   ;; ---- the store, over HTTP ------------------------------------------------
 
   (test-case "a saved edit shows up on the next request"

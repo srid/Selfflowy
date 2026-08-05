@@ -10,6 +10,7 @@
 (require rackunit
          json
          net/http-client
+         net/uri-codec
          racket/async-channel
          racket/file
          racket/list
@@ -17,6 +18,7 @@
          racket/string
          selfflowy/ops
          selfflowy/web/acp
+         selfflowy/web/markdown
          selfflowy/web/serve)
 
 (define fake-agent
@@ -117,6 +119,42 @@
       [(string-prefix? line "event: ") (loop (substring line 7) data)]
       [(string-prefix? line "data: ") (loop name (cons (substring line 6) data))]
       [else (loop name data)])))
+
+;; -> (values status-code body-string). A form post, the way the panel sends
+;; one; `fields` is an alist, url-encoded here rather than by hand.
+(define (POST port path [fields '()])
+  (define-values (status _headers in)
+    (http-sendrecv "127.0.0.1" path #:port port #:method #"POST"
+                   #:headers (list #"Content-Type: application/x-www-form-urlencoded")
+                   #:data (alist->form-urlencoded fields)))
+  (define body (port->string in))
+  (close-input-port in)
+  (values (string->number (cadr (string-split (bytes->string/utf-8 status) " ")))
+          body))
+
+(define (GET port path)
+  (define-values (status _headers in)
+    (http-sendrecv "127.0.0.1" path #:port port #:method #"GET"))
+  (define body (port->string in))
+  (close-input-port in)
+  (values (string->number (cadr (string-split (bytes->string/utf-8 status) " ")))
+          body))
+
+;; Frames off a live /events connection, up to and including the first one of
+;; `type`. Same idea as frames-through, one layer out: over HTTP.
+(define (events-through in type)
+  (let loop ([acc '()] [n 0])
+    (cond
+      [(> n 20) (reverse acc)]
+      [else
+       (define ev (next-event in))
+       (cond
+         [(not ev) (reverse acc)]
+         [else
+          (define js (string->jsexpr (cdr ev)))
+          (if (equal? (hash-ref js 'type #f) type)
+              (reverse (cons js acc))
+              (loop (cons js acc) (add1 n)))])])))
 
 ;; ---- the CLI ---------------------------------------------------------------
 
@@ -321,6 +359,116 @@
          (unless (or (equal? (hash-ref j 'type) "done") (> n 20))
            (loop (add1 n))))
        (close-input-port in))))
+
+  ;; ---- the chat routes -----------------------------------------------------
+  ;;
+  ;; The panel POSTs and gets a STATUS; what it draws comes back over the
+  ;; stream. So every one of these asserts the frames, not the reply body.
+
+  (test-case "POST /chat is accepted, and the whole turn arrives on /events"
+    (with-server
+     (λ (port agent)
+       (define in (open-events port))
+       (define-values (code body) (POST port "/chat" '((text . "hello there"))))
+       (check-equal? code 204 body)
+       ;; 204 means 204: nothing to render, because the stream renders it
+       (check-equal? body "" body)
+       (define fs (events-through in "done"))
+       (check-equal? (for/list ([f (in-list fs)]) (hash-ref f 'type))
+                     '("user" "chunk" "chunk" "tool" "tool" "done"))
+       (check-equal? (hash-ref (car fs) 'text) "hello there")
+       (define done (last fs))
+       (check-equal? (hash-ref done 'stopReason) "end_turn")
+       ;; the done frame carries the finished text as Markdown, and it is the
+       ;; markdown module's own output — not a second renderer
+       (check-equal? (hash-ref done 'html) (note->html-string "hello world"))
+       (close-input-port in))))
+
+  (test-case "an empty message is a 400, and the agent never hears about it"
+    (with-server
+     (λ (port agent)
+       (define-values (code body) (POST port "/chat" '((text . "   "))))
+       (check-equal? code 400 body)
+       (check-true (string-contains? body "message") body)
+       (define-values (code2 body2) (POST port "/chat" '()))
+       (check-equal? code2 400 body2)
+       (check-equal? (agent-transcript agent) '()))))
+
+  (test-case "a message during a turn is a 409; cancel ends the turn"
+    (with-server
+     (λ (port agent)
+       (define in (open-events port))
+       (define-values (code _b) (POST port "/chat" '((text . "SLOW one"))))
+       (check-equal? code 204)
+       ;; Under way, not merely accepted: the `user` frame goes out before the
+       ;; subprocess even exists, and a cancel with no session yet cancels
+       ;; nothing. The first chunk is the agent actually talking.
+       (check-equal? (for/list ([f (in-list (events-through in "chunk"))])
+                       (hash-ref f 'type))
+                     '("user" "chunk"))
+       (define-values (busy body) (POST port "/chat" '((text . "and another"))))
+       (check-equal? busy 409 body)
+       (check-true (string-contains? body "busy") body)
+       (define-values (cancelled cbody) (POST port "/chat/cancel"))
+       (check-equal? cancelled 204 cbody)
+       (define done (last (events-through in "done")))
+       (check-equal? (hash-ref done 'stopReason) "cancelled")
+       (check-true (wait-idle agent))
+       (close-input-port in))))
+
+  (test-case "POST /chat/new pushes a reset, which is what clears the panels"
+    (with-server
+     (λ (port agent)
+       (define in (open-events port))
+       (define-values (_c _b) (POST port "/chat" '((text . "hello there"))))
+       (events-through in "done")
+       (check-true (wait-idle agent))
+       (define-values (code body) (POST port "/chat/new"))
+       (check-equal? code 204 body)
+       (define ev (next-event in))
+       (check-not-false ev "no reset frame within the timeout")
+       (check-equal? (hash-ref (string->jsexpr (cdr ev)) 'type) "reset")
+       (close-input-port in))))
+
+  ;; A browser that reloads (or connects late) missed the frames. The page is
+  ;; where the conversation comes back, and everything the agent or the user
+  ;; wrote is TEXT in it — an xexpr is what escapes it.
+  (test-case "the page replays the transcript, escaped"
+    (with-server
+     (λ (port agent)
+       (define in (open-events port))
+       (define-values (_c _b)
+         (POST port "/chat" '((text . "run <script>alert(1)</script> please"))))
+       (events-through in "done")
+       (check-true (wait-idle agent))
+       (close-input-port in)
+       (define-values (code body) (GET port "/"))
+       (check-equal? code 200)
+       (check-true (string-contains? body "&lt;script&gt;alert(1)&lt;/script&gt;") body)
+       (check-false (string-contains? body "<script>alert(1)") body)
+       ;; the agent's finished text is Markdown; the tool line is one line
+       (check-true (string-contains? body "<p>hello world</p>") body)
+       (check-true (string-contains? body "data-tool-id=\"call-1\"") body)
+       (check-true (string-contains? body "data-status=\"completed\"") body))))
+
+  (test-case "the page carries the panel, its script, and ONE sse connection"
+    (with-server
+     (λ (port agent)
+       (define-values (code body) (GET port "/"))
+       (check-equal? code 200)
+       (check-true (string-contains? body "id=\"sf-chat\"") body)
+       (check-true (string-contains? body "src=\"/static/chat.js\"") body)
+       (check-true (string-contains? body "action=\"/chat\"") body)
+       (check-true (string-contains? body "data-post=\"/chat/new\"") body)
+       (check-true (string-contains? body "data-post=\"/chat/cancel\"") body)
+       ;; the panel borrows the page's connection: it subscribes to the chat
+       ;; event on the body's stream, and opens nothing of its own
+       (check-true (string-contains? body "sse-swap=\"chat\"") body)
+       (check-equal? (length (regexp-match* #rx"sse-connect=" body)) 1 body)
+       ;; and the script it does that with is a file, not an inline blob
+       (define-values (jcode js) (GET port "/static/chat.js"))
+       (check-equal? jcode 200)
+       (check-false (string-contains? js "new EventSource") js))))
 
   ;; ---- the CLI contract ----------------------------------------------------
 
