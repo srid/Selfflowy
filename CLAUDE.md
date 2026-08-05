@@ -5,11 +5,16 @@ Read README.md and docs/*.md first. This file is only what you can't infer.
 ## HARD RULES
 
 * Personal outline DATA lives outside the repo: `$SELFFLOWY_HOME`
-  (default `~/Dropbox/Selfflowy-Srid/`) — `Tasks.rkt`, `Daily.rkt`,
-  `Roadmap.rkt`. NEVER commit those. NEVER invent content for them; treat
-  them as user-owned. Re-validate after any edit. `examples/` is demo
+  (default `~/Dropbox/Selfflowy-Srid/`) — `Tasks.rkt`, `Daily.rkt` (+
+  `Daily/` fragments). NEVER commit those. NEVER invent content for them;
+  treat them as user-owned. Re-validate after any edit. `examples/` is demo
   fiction only (e.g. `examples/Daily.rkt` + fragments); CI uses examples
-  only, never Dropbox paths.
+  only, never Dropbox paths. `Roadmap.rkt` lives AT THE REPO ROOT instead —
+  it's public, edited and committed like any other repo file (still: never
+  invent content the user didn't ask for; run `selfflowy check` after
+  editing it). The author's private `Tasks.rkt` `@include`s the repo's
+  `Roadmap.rkt`, so breaking `Roadmap.rkt` breaks their whole outline —
+  check it.
 * No hand-rolling where a maintained library exists. In use: racket/cmdline,
   json (write-json/read-json), xml (xexprs), gregor (dates), markdown
   (title/note formatting in the web view only).

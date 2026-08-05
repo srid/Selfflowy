@@ -104,16 +104,23 @@ itself still writes nothing; there is no static HTML export.
 
 ## ROADMAP
 
-Track your own plan as a `#lang selfflowy` outline (e.g. under
-`$SELFFLOWY_HOME/Roadmap.rkt`). Repo demos live in `examples/` (see
-`examples/Daily.rkt` for `@include` composition).
+The project tracks its own plan the same way it wants you to track yours:
+`Roadmap.rkt` at the repo root is a `#lang selfflowy` outline, edited and
+committed like any other file. `selfflowy tree Roadmap.rkt` (or `just tree
+Roadmap.rkt`) gives the JSON view.
+
+Track your own plan as a `#lang selfflowy` outline wherever you like
+(`$SELFFLOWY_HOME`) — a private `Tasks.rkt` can `@include` the repo's
+`Roadmap.rkt` to pull it into your own outline; that's exactly what the
+author does. Repo demos live in `examples/` (see `examples/Daily.rkt` for
+`@include` composition).
 
 ## BUILDING
 
 ```bash
 nix develop        # racket 9.2 + just; or install them yourself
 just install       # gregor + markdown, then --link selfflowy/
-just check         # validates $SELFFLOWY_HOME/{Tasks,Daily,Roadmap}.rkt
+just check         # validates $SELFFLOWY_HOME/*.rkt
 just tree examples/Example.rkt   # JSON forest for agents
 just serve                       # web view on http://127.0.0.1:8080
 just agenda
