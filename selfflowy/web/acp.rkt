@@ -40,7 +40,10 @@
          racket/path
          racket/string
          (only-in selfflowy/fail user-fail)
-         (only-in selfflowy/ops exn:fail:op))
+         (only-in selfflowy/ops exn:fail:op)
+         ;; render-time Markdown has one owner; this module only asks it for
+         ;; the finished turn's HTML
+         (only-in selfflowy/web/markdown note->html-string))
 
 ;; The surface the server sees. `make-acp-agent` is told how to reach the
 ;; outside world (a command, a directory, somewhere to put frames) and nothing
@@ -170,6 +173,19 @@
 ;; A frame is one line of JSON under `acp-event-name`. Callers hold `sema`:
 ;; broadcasting inside the lock is what keeps the stream and the transcript
 ;; telling the same story in the same order.
+;;
+;; The vocabulary, append-only:
+;;
+;;   {"type":"user","text"}                   the prompt, echoed to every tab
+;;   {"type":"chunk","text"}                  agent text, as it arrives
+;;   {"type":"tool","id","title","status"}    same id = the same line, updated
+;;   {"type":"done","stopReason","html"}      the turn ended; `html` is the
+;;                                            turn's agent text rendered as
+;;                                            Markdown (web/markdown), which
+;;                                            is what a panel swaps in for the
+;;                                            plain text the chunks built
+;;   {"type":"error","message"}               the turn ended badly
+;;   {"type":"reset"}                         new chat: panels clear
 
 (define (broadcast! ag js)
   (with-handlers ([exn:fail? (λ (e) (log-line ag (format "broadcast failed: ~a" (exn-message e))))])
@@ -590,7 +606,11 @@ tool calls are allowed one at a time instead"
                         (if (string? s) s "end_turn")))
          (set-turn-status! tn 'done)
          (set-turn-stop! tn stop)
-         (broadcast! ag (hash 'type "done" 'stopReason stop))]
+         ;; Markdown is render-time only: the turn keeps the raw text, and the
+         ;; frame carries a rendered COPY so a panel that accumulated plain
+         ;; chunks can swap in the real thing without parsing anything.
+         (broadcast! ag (hash 'type "done" 'stopReason stop
+                              'html (note->html-string (turn-agent tn))))]
         [else
          (set-turn-status! tn 'error)
          (set-turn-err! tn (cdr outcome))
