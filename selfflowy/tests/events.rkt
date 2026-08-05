@@ -1,10 +1,12 @@
 #lang racket/base
 
-;; The SSE hub in isolation: framing, fan-out, and who gets dropped. The
-;; wired-up version lives in tests/serve.rkt.
+;; The SSE hub and the watcher's midnight arithmetic — both in isolation,
+;; no server and no clock. The wired-up version lives in tests/serve.rkt.
 
 (require rackunit
-         selfflowy/web/events)
+         gregor
+         selfflowy/web/events
+         selfflowy/web/watch)
 
 ;; -> frame string | #f. Generous: these are all local channel hops.
 (define (take-frame s [timeout 5])
@@ -78,4 +80,24 @@
     (check-equal? (hub-subscriber-count h) 0)
     ;; the frames it did take are the FIRST ones: the queue is bounded, not
     ;; a ring, so nothing it was told is a lie
-    (check-equal? (take-frame s) "event: outline\ndata: 0\n\n")))
+    (check-equal? (take-frame s) "event: outline\ndata: 0\n\n"))
+
+  ;; ---- midnight ------------------------------------------------------------
+
+  (test-case "seconds-until-midnight is the distance to the next local one"
+    (check-equal? (seconds-until-midnight (moment 2026 8 4 23 30 0 #:tz "UTC")) 1800)
+    (check-equal? (seconds-until-midnight (moment 2026 8 4 0 0 1 #:tz "UTC")) 86399)
+    ;; exactly midnight is a full day from the NEXT one, not zero
+    (check-equal? (seconds-until-midnight (moment 2026 8 4 0 0 0 #:tz "UTC")) 86400))
+
+  (test-case "midnight is the zone's, not UTC's"
+    ;; 23:30 in New York is 03:30 UTC; the boundary that matters is local
+    (check-equal? (seconds-until-midnight
+                   (moment 2026 8 4 23 30 0 #:tz "America/New_York"))
+                  1800))
+
+  (test-case "a DST spring-forward day is 23 hours, and the calendar says so"
+    ;; 2026-03-08 is the US spring-forward; midnight to midnight is 82800s
+    (check-equal? (seconds-until-midnight
+                   (moment 2026 3 8 0 0 0 #:tz "America/New_York"))
+                  82800)))
